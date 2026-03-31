@@ -1,7 +1,21 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { ArrowLeft, Calendar } from "lucide-react";
 import { notFound } from "next/navigation";
 import { getDocById } from "@/lib/docs";
+
+/* 动态生成页面标题，让浏览器标签显示文章名称 */
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}): Promise<Metadata> {
+  const { id } = await params;
+  const doc = await getDocById(id);
+  return {
+    title: doc ? `${doc.title} · TeachHub` : "TeachHub",
+  };
+}
 
 /**
  * 根据文档内容特征选择排版方案
