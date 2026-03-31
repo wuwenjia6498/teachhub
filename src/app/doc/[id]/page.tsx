@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ArrowLeft, Calendar } from "lucide-react";
 import { notFound } from "next/navigation";
 import { getDocById } from "@/lib/docs";
+import CopyGuard from "./CopyGuard";
 
 /* 动态生成页面标题，让浏览器标签显示文章名称 */
 export async function generateMetadata({
@@ -70,38 +71,40 @@ export default async function DocPage({
         </div>
       </header>
 
-      {/* 文档阅读区 */}
-      <main className="max-w-3xl mx-auto px-6 py-10">
-        {/* 标题区域 */}
-        <div className="mb-8 pb-6 border-b border-[#e8e5df]">
-          <h1 className="text-2xl font-semibold text-[#2d2d2d] leading-snug mb-3">
-            {doc.title}
-          </h1>
-          <div className="flex items-center gap-1.5 text-xs text-[#b0a898]">
-            <Calendar size={13} />
-            <span>{doc.date}</span>
+      {/* 文档阅读区（CopyGuard 防止随手复制） */}
+      <CopyGuard>
+        <main className="max-w-3xl mx-auto px-6 py-10">
+          {/* 标题区域 */}
+          <div className="mb-8 pb-6 border-b border-[#e8e5df]">
+            <h1 className="text-2xl font-semibold text-[#2d2d2d] leading-snug mb-3">
+              {doc.title}
+            </h1>
+            <div className="flex items-center gap-1.5 text-xs text-[#b0a898]">
+              <Calendar size={13} />
+              <span>{doc.date}</span>
+            </div>
           </div>
-        </div>
 
-        {/* AI 摘要 */}
-        {doc.summary && (
-          <div className="mb-8 px-5 py-4 rounded-xl bg-[#f0f4f1] border border-[#dde5df]">
-            <p className="text-sm text-[#5a7a6a] leading-relaxed">{doc.summary}</p>
-          </div>
-        )}
+          {/* AI 摘要 */}
+          {doc.summary && (
+            <div className="mb-8 px-5 py-4 rounded-xl bg-[#f0f4f1] border border-[#dde5df]">
+              <p className="text-sm text-[#5a7a6a] leading-relaxed">{doc.summary}</p>
+            </div>
+          )}
 
-        {/* 正文：prose 尺寸根据内容长度自适应 */}
-        <article
-          className={`prose prose-stone max-w-none ${typoClass}
-                     prose-headings:text-[#3d3d3d] prose-headings:font-semibold
-                     prose-p:text-[#555] prose-p:leading-loose
-                     prose-a:text-[#5a8a6a] prose-a:no-underline hover:prose-a:underline
-                     prose-strong:text-[#3d3d3d]
-                     prose-li:text-[#555] prose-li:leading-loose
-                     prose-blockquote:border-l-[#c5d5cb] prose-blockquote:text-[#777]`}
-          dangerouslySetInnerHTML={{ __html: doc.content }}
-        />
-      </main>
+          {/* 正文：prose 尺寸根据内容长度自适应 */}
+          <article
+            className={`prose prose-stone max-w-none ${typoClass}
+                       prose-headings:text-[#3d3d3d] prose-headings:font-semibold
+                       prose-p:text-[#555] prose-p:leading-loose
+                       prose-a:text-[#5a8a6a] prose-a:no-underline hover:prose-a:underline
+                       prose-strong:text-[#3d3d3d]
+                       prose-li:text-[#555] prose-li:leading-loose
+                       prose-blockquote:border-l-[#c5d5cb] prose-blockquote:text-[#777]`}
+            dangerouslySetInnerHTML={{ __html: doc.content }}
+          />
+        </main>
+      </CopyGuard>
     </div>
   );
 }
