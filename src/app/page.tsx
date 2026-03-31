@@ -33,6 +33,7 @@ export default function HomePage() {
   const [loading, setLoading] = useState(true);
   const [visibleMonths, setVisibleMonths] = useState(PAGE_SIZE);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [searchFocused, setSearchFocused] = useState(false);
 
   /* 拉取文档列表 */
   useEffect(() => {
@@ -103,19 +104,30 @@ export default function HomePage() {
           </Link>
 
           <div className="relative flex-1 z-20">
-            <Search
-              size={18}
-              className="absolute left-4 top-1/2 -translate-y-1/2 text-[#b0b0b0] pointer-events-none"
-            />
+            {/* 空闲时居中显示图标+文字，激活时移到左侧 */}
+            {!searchFocused && !query ? (
+              <div className="absolute inset-0 flex items-center justify-center gap-2 text-[#b8b8b8] pointer-events-none">
+                <Search size={16} />
+                <span className="text-sm">Search</span>
+              </div>
+            ) : (
+              <Search
+                size={18}
+                className="absolute left-4 top-1/2 -translate-y-1/2 text-[#b0b0b0] pointer-events-none"
+              />
+            )}
             <input
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
               placeholder=""
-              className="w-full pl-11 pr-4 py-2.5 rounded-xl bg-white border border-[#e0ddd6]
-                         text-sm text-[#3d3d3d] placeholder:text-[#b8b8b8]
+              className={`w-full py-2.5 rounded-xl bg-white border border-[#e0ddd6]
+                         text-sm text-[#3d3d3d]
                          focus:outline-none focus:border-[#a8c5b8] focus:ring-2 focus:ring-[#a8c5b8]/20
-                         transition-all"
+                         transition-all
+                         ${searchFocused || query ? "pl-11 pr-4" : "px-4"}`}
             />
           </div>
 
