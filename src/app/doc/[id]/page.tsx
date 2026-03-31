@@ -13,7 +13,7 @@ export async function generateMetadata({
   const { id } = await params;
   const doc = await getDocById(id);
   return {
-    title: doc ? `${doc.title} · TeachHub` : "TeachHub",
+    title: doc ? `${doc.title} · 读书会群分享回顾` : "读书会群分享回顾",
   };
 }
 

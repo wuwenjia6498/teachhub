@@ -99,7 +99,7 @@ export default function HomePage() {
               className="rounded-full"
             />
             <span className="text-base font-medium text-[#4a4a4a] tracking-wide hidden sm:inline">
-              TeachHub
+              读书会群分享回顾
             </span>
           </Link>
 

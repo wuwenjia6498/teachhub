@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "TeachHub · 内部教研知识库",
+  title: "读书会群分享回顾",
   description: "极简内部教研知识库，支持 Word 文档上传与全文搜索",
 };
 
