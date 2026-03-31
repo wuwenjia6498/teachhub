@@ -3,8 +3,8 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import Fuse from "fuse.js";
 import { Search, FileText, ChevronDown, Settings } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
+import Image from "next/image";
 import type { Doc } from "@/types/doc";
 
 /** 按月份分组：{ "2026年3月": Doc[], ... } */
@@ -90,7 +90,13 @@ export default function HomePage() {
       <header className="sticky top-0 z-10 bg-[#f8f7f4]/80 backdrop-blur-md border-b border-[#e8e5df]">
         <div className="max-w-3xl mx-auto px-6 py-5 flex items-center gap-4">
           <Link href="/" className="flex items-center gap-2 shrink-0">
-            <Image src="/logo.png" alt="老约翰儿童阅读" width={36} height={36} className="object-contain bg-transparent" />
+            <Image
+              src="/logo-1.png"
+              alt="TeachHub Logo"
+              width={36}
+              height={36}
+              className="rounded-full"
+            />
             <span className="text-base font-medium text-[#4a4a4a] tracking-wide hidden sm:inline">
               TeachHub
             </span>
