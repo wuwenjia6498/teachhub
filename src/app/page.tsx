@@ -90,7 +90,7 @@ export default function HomePage() {
       <header className="sticky top-0 z-10 bg-[#f8f7f4]/80 backdrop-blur-md border-b border-[#e8e5df]">
         <div className="max-w-3xl mx-auto px-6 py-5 flex items-center gap-4">
           <Link href="/" className="flex items-center gap-2 shrink-0">
-            <Image src="/logo.png" alt="老约翰儿童阅读" width={32} height={32} style={{ mixBlendMode: "multiply" }} />
+            <Image src="/logo.png" alt="老约翰儿童阅读" width={36} height={36} className="object-contain bg-transparent" />
             <span className="text-base font-medium text-[#4a4a4a] tracking-wide hidden sm:inline">
               TeachHub
             </span>
