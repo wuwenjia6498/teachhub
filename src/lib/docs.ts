@@ -1,5 +1,8 @@
-import { kv } from "@vercel/kv";
+import { Redis } from "@upstash/redis";
 import type { Doc } from "@/types/doc";
+
+/* 通过环境变量 UPSTASH_REDIS_REST_URL / UPSTASH_REDIS_REST_TOKEN 自动初始化 */
+const kv = Redis.fromEnv();
 
 /** 文档元信息（不含正文，用于列表展示） */
 export type DocMeta = Omit<Doc, "content">;

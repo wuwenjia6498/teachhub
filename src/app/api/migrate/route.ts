@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
-import { kv } from "@vercel/kv";
+import { Redis } from "@upstash/redis";
+const kv = Redis.fromEnv();
 import type { Doc } from "@/types/doc";
 import type { DocMeta } from "@/lib/docs";
 
