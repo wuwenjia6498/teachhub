@@ -111,7 +111,7 @@ export default function HomePage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="输入书名、难点或关键词搜索教研资料..."
+              placeholder=""
               className="w-full pl-11 pr-4 py-2.5 rounded-xl bg-white border border-[#e0ddd6]
                          text-sm text-[#3d3d3d] placeholder:text-[#b8b8b8]
                          focus:outline-none focus:border-[#a8c5b8] focus:ring-2 focus:ring-[#a8c5b8]/20
