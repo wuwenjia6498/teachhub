@@ -1,21 +1,7 @@
-import fs from "fs";
-import path from "path";
 import Link from "next/link";
 import { ArrowLeft, Calendar } from "lucide-react";
 import { notFound } from "next/navigation";
-import type { Doc } from "@/types/doc";
-
-/* Server Component：直接读取 database.json 获取文档数据 */
-async function getDoc(id: string): Promise<Doc | null> {
-  try {
-    const dbPath = path.join(process.cwd(), "database.json");
-    const raw = fs.readFileSync(dbPath, "utf-8");
-    const docs: Doc[] = JSON.parse(raw);
-    return docs.find((d) => d.id === id) ?? null;
-  } catch {
-    return null;
-  }
-}
+import { getDocById } from "@/lib/docs";
 
 /**
  * 根据文档内容特征选择排版方案
@@ -49,7 +35,7 @@ export default async function DocPage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const doc = await getDoc(id);
+  const doc = await getDocById(id);
 
   if (!doc) notFound();
 

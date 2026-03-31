@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
 import mammoth from "mammoth";
 import type { Doc } from "@/types/doc";
-
-/* 数据文件路径 */
-const DB_PATH = path.join(process.cwd(), "database.json");
+import { prependDoc } from "@/lib/docs";
 
 const AIHUBMIX_API_URL = "https://aihubmix.com/v1/chat/completions";
 const AIHUBMIX_MODEL = "gemini-2.5-flash";
@@ -50,7 +46,7 @@ async function generateSummary(plainText: string): Promise<string> {
   }
 }
 
-/* POST /api/upload — 接收 .docx 文件，解析并写入 database.json */
+/* POST /api/upload — 接收 .docx 文件，解析后写入 Vercel KV */
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -80,24 +76,16 @@ export async function POST(req: NextRequest) {
 
     /* 分享日期：优先使用前端传入的人工选择日期，否则取当前日期 */
     const inputDate = formData.get("date") as string | null;
-    const date = inputDate && /^\d{4}-\d{2}-\d{2}$/.test(inputDate)
-      ? inputDate
-      : new Date().toISOString().split("T")[0];
+    const date =
+      inputDate && /^\d{4}-\d{2}-\d{2}$/.test(inputDate)
+        ? inputDate
+        : new Date().toISOString().split("T")[0];
     const id = String(Date.now());
 
     const newDoc: Doc = { id, date, title, content: htmlContent, summary };
 
-    /* 读取现有数据，将新文档插入到最前面 */
-    let docs: Doc[] = [];
-    try {
-      const raw = fs.readFileSync(DB_PATH, "utf-8");
-      docs = JSON.parse(raw);
-    } catch {
-      docs = [];
-    }
-
-    docs.unshift(newDoc);
-    fs.writeFileSync(DB_PATH, JSON.stringify(docs, null, 2), "utf-8");
+    /* 写入 Vercel KV */
+    await prependDoc(newDoc);
 
     return NextResponse.json({ success: true, doc: { id, date, title, summary } });
   } catch (err) {
