@@ -289,7 +289,7 @@ export default function AdminPage() {
           {state === "error" && (
             <AlertCircle size={40} className="text-[#ab7a7a]" />
           )}
-          {state === "idle" && !pendingFile && (
+          {(state === "idle" || state === "dragging") && !pendingFile && (
             <Upload
               size={40}
               className={`transition-colors ${state === "dragging" ? "text-[#7aab8e]" : "text-[#b0b0b0]"}`}
