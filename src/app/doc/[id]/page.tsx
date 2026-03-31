@@ -27,14 +27,14 @@ function getTypographyClass(html: string) {
   const listCount = (html.match(/<li[\s>]/g) || []).length;
   const isListHeavy = listCount > 10;
 
-  /* 根据字数选择 prose 尺寸（整体大一号） */
+  /* 根据字数选择 prose 尺寸 */
   let sizeClass: string;
   if (charCount < 500) {
-    sizeClass = "prose-xl";
-  } else if (charCount < 3000) {
     sizeClass = "prose-lg";
-  } else {
+  } else if (charCount < 3000) {
     sizeClass = "prose-base";
+  } else {
+    sizeClass = "prose-sm";
   }
 
   /* 列表密集型文档加上标记，CSS 中做特殊处理 */
@@ -94,10 +94,10 @@ export default async function DocPage({
         <article
           className={`prose prose-stone max-w-none ${typoClass}
                      prose-headings:text-[#3d3d3d] prose-headings:font-semibold
-                     prose-p:text-[#555] prose-p:leading-relaxed
+                     prose-p:text-[#555] prose-p:leading-loose
                      prose-a:text-[#5a8a6a] prose-a:no-underline hover:prose-a:underline
                      prose-strong:text-[#3d3d3d]
-                     prose-li:text-[#555]
+                     prose-li:text-[#555] prose-li:leading-loose
                      prose-blockquote:border-l-[#c5d5cb] prose-blockquote:text-[#777]`}
           dangerouslySetInnerHTML={{ __html: doc.content }}
         />
