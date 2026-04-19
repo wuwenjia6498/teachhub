@@ -109,6 +109,7 @@ curl -X POST https://你的域名/api/migrate/extract-images \
 | `/api/upload` | POST | 接收 `.docx` 文件，解析正文 + 图片外置 Blob + AI 摘要后入 Redis |
 | `/api/migrate` | POST | 一次性将 `database.json` 历史数据迁移至 Upstash Redis（需鉴权） |
 | `/api/migrate/extract-images` | POST | 一次性把 Redis 里历史文档的 base64 图片抽出，外置到 Vercel Blob（需鉴权） |
+| `/api/migrate/clean-orphan-images` | POST | 扫描 Blob 与 Redis 对比，列出/删除"无文档引用"的孤儿图（需鉴权） |
 
 ---
 
@@ -142,8 +143,9 @@ teachub/
 │           ├── docs/route.ts                       # GET 文档列表
 │           ├── docs/[id]/route.ts                  # GET 单篇 / DELETE 删除
 │           ├── upload/route.ts                     # POST .docx 上传（含图片外置）
-│           ├── migrate/route.ts                    # POST 历史数据迁移
-│           └── migrate/extract-images/route.ts     # POST base64 图片外置到 Blob
+│           ├── migrate/route.ts                          # POST 历史数据迁移
+│           ├── migrate/extract-images/route.ts           # POST base64 图片外置到 Blob
+│           └── migrate/clean-orphan-images/route.ts      # POST 孤儿图列出/清理
 └── package.json
 ```
 
@@ -175,7 +177,7 @@ teachub/
 针对「点击文章打开慢」这一核心体验，采用了多层缓存 + 预加载策略：
 
 ### 服务端
-1. **ISR 静态预生成**：`/doc/[id]` 带 `revalidate = 3600` + `generateStaticParams`，部署后所有文章在构建时预渲染为静态 HTML，运行时直接从 CDN 返回。
+1. **按需 ISR**：`/doc/[id]` 带 `revalidate = 3600`、`dynamicParams = true`。首次访问 SSR 后 CDN 缓存 1 小时；不在构建期预渲染全部文章，避免大文档（曾经的 2~3MB base64 HTML）拖垮构建。
 2. **进程级内存缓存**（`src/lib/docs.ts`）：模块级 `Map` + TTL，同一 Node 进程内重复读取零网络 IO，dev/prod 都生效。
 3. **Next.js `unstable_cache`**：按 tag 失效，保证写入后立即看到最新数据。
 4. **内容 gzip 压缩**：写入 Redis 前对 HTML 做 gzip (level 9)，体积降到 15-25%，网络传输更快；读取时自动解压，向后兼容老数据。
@@ -190,3 +192,96 @@ teachub/
 ### 渲染层
 10. **`next/font` + 系统中文字体栈**：英文用 Inter (latin 子集，~20KB 自托管)，中文走系统字体，`display: swap` 避免 FOIT。
 11. **LCP 优化**：首页 logo 加 `priority` 提前加载。
+
+---
+
+## 图片外置 Vercel Blob 纪要
+
+> 本节记录 2026-04 的一次重大优化：把 docx 内嵌的 base64 图片从 Redis 里全部抽出外置到 Vercel Blob。
+> 真实收益：Redis 里全部文档的 HTML 体积从 **≈ 86 MB** 缩到 **≈ 0.33 MB**（压缩 99.6%），文章详情页首屏几乎秒开。
+
+### 架构对比
+
+**旧（base64 内嵌）**
+
+```
+浏览器 ────(请求文章)────▶ Next.js SSR
+                             │
+                             ▼
+                       读 Upstash Redis
+                             │
+                    单篇 HTML 常 2-3 MB，包含 base64 图
+                             │
+                             ▼
+                    阻塞式返回完整 HTML
+                    （图片不加载完，文字也出不来）
+```
+
+**新（Blob 外置 + 去重）**
+
+```
+浏览器 ────(请求文章)────▶ Next.js SSR
+                             │
+                             ▼
+                       读 Upstash Redis
+                             │
+                    单篇 HTML 通常 10-20 KB（只剩文本 + <img src>）
+                             │
+                             ▼
+                    秒出文字  ───▶ 浏览器并行请求 CDN 图片
+                                    │
+                                    ▼
+                          Vercel Blob (images/<sha256>.<ext>)
+                                    │
+                               按 SHA-256 去重，同图只存 1 份
+```
+
+### 三类迁移接口（一次性操作，跑完即可忘）
+
+| 接口 | 何时需要 | 推荐流程 |
+|---|---|---|
+| `/api/migrate`                         | 仅"从 database.json 首次初始化 Redis" | 只跑一次 |
+| `/api/migrate/extract-images`          | 首次启用 Blob、把历史 base64 外置 | 先 `?dryRun=1` 看统计，再去掉参数正式执行 |
+| `/api/migrate/clean-orphan-images`     | 定期（如每季度）清理无引用的 Blob | 先 `?dryRun=1` 列孤儿，无误再正式删除 |
+
+所有接口都需要 `Authorization: Bearer $ADMIN_PASSWORD`。
+
+**示例（PowerShell，本地或生产同理）**
+
+```powershell
+# 1) 历史 base64 图片外置 —— dryRun
+Invoke-RestMethod `
+  -Uri "http://localhost:3000/api/migrate/extract-images?dryRun=1" `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer $env:ADMIN_PASSWORD" }
+
+# 2) 满意后去掉 dryRun 正式执行
+Invoke-RestMethod `
+  -Uri "http://localhost:3000/api/migrate/extract-images" `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer $env:ADMIN_PASSWORD" }
+
+# 3) 孤儿图清理 —— dryRun 看有没有孤儿
+Invoke-RestMethod `
+  -Uri "http://localhost:3000/api/migrate/clean-orphan-images?dryRun=1" `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer $env:ADMIN_PASSWORD" }
+```
+
+**示例（bash / 线上环境）**
+
+```bash
+curl -X POST "https://你的域名/api/migrate/extract-images?dryRun=1" \
+  -H "Authorization: Bearer $ADMIN_PASSWORD"
+
+curl -X POST "https://你的域名/api/migrate/clean-orphan-images?dryRun=1" \
+  -H "Authorization: Bearer $ADMIN_PASSWORD"
+```
+
+### 运维注意事项
+
+1. **本地与线上共用同一个 Upstash Redis**：本地跑迁移 = 直接改生产数据。跑任何写操作前务必确认。
+2. **Vercel Blob 必须创建为 Public Store**：Private Store 返回的 URL 需签名，无法直接在 `<img src>` 使用。如误建成 Private，请删除后重建。
+3. **新上传 docx 自动走 Blob**：`/api/upload` 里用 mammoth 的 `convertImage` 钩子拦截内嵌图片直传 Blob，HTML 里只写 URL。历史文档走过一次 `extract-images` 即可。
+4. **SHA-256 去重记在 Redis**：键为 `img:{hash32}`。删除 Blob 图片时 `clean-orphan-images` 会同步清这条映射，下次同内容图片会重新上传而不是命中失效 URL。
+5. **防复制开关**：`NEXT_PUBLIC_DISABLE_COPY_GUARD=1` 只在本地调试时设置。**不要**在 Vercel 生产环境配置这个变量，否则右键/复制保护会失效。

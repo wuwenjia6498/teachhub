@@ -1,4 +1,4 @@
-import { put } from "@vercel/blob";
+import { put, list, del } from "@vercel/blob";
 import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
 
@@ -130,4 +130,110 @@ export async function extractInlineImages(
   }
 
   return { html: out, replaced, failed };
+}
+
+/* ==========================================================================
+ * 孤儿图清理相关
+ * --------------------------------------------------------------------------
+ * 背景：迁移 / 重复上传 / 文档更新时，Blob 里可能留下"没人引用"的图片。
+ * 长期不清理会白白占用存储配额。这一段封装"列出 + 删除"的底层能力，
+ * 具体的业务编排（读 Redis 收集引用、比对、鉴权）放在 API 路由里。
+ * ========================================================================== */
+
+/** 单张 Blob 图片的元信息 */
+export interface BlobImageItem {
+  /** 对象 key，如 "images/xxxxxxxx.png" */
+  pathname: string;
+  /** 公网可访问 URL */
+  url: string;
+  /** 字节数 */
+  size: number;
+  /** 上传时间 */
+  uploadedAt: Date;
+}
+
+/**
+ * 分页列出 Blob 里 images/ 前缀的全部文件
+ * Vercel Blob 单次最多返回 1000 条，超出要用 cursor 翻页
+ */
+export async function listAllBlobImages(): Promise<BlobImageItem[]> {
+  const all: BlobImageItem[] = [];
+  let cursor: string | undefined = undefined;
+
+  do {
+    const page: {
+      blobs: Array<{
+        pathname: string;
+        url: string;
+        size: number;
+        uploadedAt: Date;
+      }>;
+      cursor?: string;
+      hasMore: boolean;
+    } = await list({ prefix: "images/", cursor, limit: 1000 });
+
+    for (const b of page.blobs) {
+      all.push({
+        pathname: b.pathname,
+        url: b.url,
+        size: b.size,
+        uploadedAt: b.uploadedAt,
+      });
+    }
+
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor);
+
+  return all;
+}
+
+/**
+ * 批量删除 Blob 图片；同步清除 Redis 里对应的 img:{hash} 去重映射
+ * 否则下次遇到同内容图片会命中 "已失效 URL"，造成 404。
+ */
+export async function deleteBlobImages(urls: string[]): Promise<number> {
+  if (urls.length === 0) return 0;
+
+  /* Vercel Blob 的 del 支持批量 */
+  await del(urls);
+
+  /* 同步清理 Redis 里失效的 hash → url 映射 */
+  const hashes = urls
+    .map((u) => extractHashFromUrl(u))
+    .filter((h): h is string => !!h);
+
+  if (hashes.length > 0) {
+    try {
+      await Promise.all(hashes.map((h) => kv.del(`img:${h}`)));
+    } catch (err) {
+      /* 映射清理失败不阻塞整体流程，下次去重会自动覆盖 */
+      console.error("清理 Redis img:{hash} 映射失败:", err);
+    }
+  }
+
+  return urls.length;
+}
+
+/**
+ * 从 Blob URL 提取 hash 片段
+ * URL 形如 https://xxx.public.blob.vercel-storage.com/images/<32hex>.<ext>
+ */
+export function extractHashFromUrl(url: string): string | null {
+  const m = url.match(/\/images\/([a-f0-9]{32})\./i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/**
+ * 从 HTML 字符串里抽出所有指向 Blob 的图片 URL
+ * 用于统计"引用中"的图片，进而算出孤儿
+ */
+export function extractBlobUrlsFromHtml(html: string): string[] {
+  if (!html) return [];
+  /* 匹配 src="https://...blob.vercel-storage.com/images/xxx.ext"
+     兼容单双引号；只匹配公开 blob 域名模式，避免误伤 */
+  const re =
+    /src=["'](https:\/\/[a-z0-9-]+\.public\.blob\.vercel-storage\.com\/images\/[a-f0-9]{32}\.[a-z0-9]+)["']/gi;
+  const out: string[] = [];
+  for (const m of html.matchAll(re)) out.push(m[1]);
+  return out;
 }
