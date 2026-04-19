@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev --turbopack",
-    "build": "next build",
+    "build": "cross-env NODE_OPTIONS=\"--require ./scripts/fix-readlink.cjs\" next build",
     "start": "next start",
     "lint": "eslint src"
   },
   "dependencies": {
     "@upstash/redis": "^1.37.0",
+    "@vercel/blob": "^2.3.3",
     "fuse.js": "^7.1.0",
     "lucide-react": "^0.475.0",
     "mammoth": "^1.9.0",
@@ -24,6 +25,7 @@
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "cross-env": "^10.1.0",
     "eslint": "^9.0.0",
     "eslint-config-next": "^15.3.0",
     "tailwindcss": "^4.0.0",

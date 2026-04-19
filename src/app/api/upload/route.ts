@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import mammoth from "mammoth";
 import type { Doc } from "@/types/doc";
 import { prependDoc } from "@/lib/docs";
+import { uploadImage } from "@/lib/imageStorage";
 
 const AIHUBMIX_API_URL = "https://aihubmix.com/v1/chat/completions";
 const AIHUBMIX_MODEL = "gemini-2.5-flash";
@@ -63,8 +64,28 @@ export async function POST(req: NextRequest) {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    /* 使用 mammoth 将 docx 转为 HTML，保留基础格式 */
-    const result = await mammoth.convertToHtml({ buffer });
+    /* 使用 mammoth 将 docx 转为 HTML，保留基础格式
+     * 关键优化：docx 内嵌的图片不再编进 base64（会让 HTML 膨胀到几 MB），
+     * 而是直接上传到 Vercel Blob，HTML 里只留 <img src="https://..."> 的引用。
+     * 效果：单篇文档 HTML 通常从 2-3MB 降到 50-200KB。
+     */
+    const result = await mammoth.convertToHtml(
+      { buffer },
+      {
+        convertImage: mammoth.images.imgElement(async (image) => {
+          try {
+            const imgBuffer = await image.readAsBuffer();
+            const url = await uploadImage(imgBuffer, image.contentType);
+            return { src: url };
+          } catch (err) {
+            /* 图片上传失败：降级为 base64 保证内容不丢，但会打日志提醒 */
+            console.error("图片上传 Blob 失败，回落 base64:", err);
+            const b64 = await image.readAsBase64String();
+            return { src: `data:${image.contentType};base64,${b64}` };
+          }
+        }),
+      },
+    );
     const htmlContent = result.value;
 
     /* 从文件名提取标题（去掉 .docx 后缀） */

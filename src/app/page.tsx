@@ -1,11 +1,17 @@
 "use client";
 
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import Fuse from "fuse.js";
 import { Search, FileText, ChevronDown, Settings } from "lucide-react";
 import Link from "next/link";
 import Image from "next/image";
 import type { Doc } from "@/types/doc";
+import {
+  cacheGet,
+  cacheSet,
+  docListKey,
+  prefetchDoc,
+} from "@/lib/clientCache";
 
 /** 按月份分组：{ "2026年3月": Doc[], ... } */
 function groupByMonth(docs: Doc[]) {
@@ -35,13 +41,42 @@ export default function HomePage() {
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
   const [searchFocused, setSearchFocused] = useState(false);
 
-  /* 拉取文档列表 */
+  /* 拉取文档列表：优先命中 sessionStorage，再后台同步 */
   useEffect(() => {
+    /* 先用 sessionStorage 的旧数据秒开 UI，减少白屏 */
+    const cached = cacheGet<Doc[]>(docListKey);
+    if (cached && cached.length) {
+      setDocs(cached);
+      setLoading(false);
+    }
+
+    /* 始终在后台拉一次最新数据，保证内容不过期 */
     fetch("/api/docs")
       .then((res) => res.json())
-      .then((data: Doc[]) => setDocs(data))
-      .catch(() => setDocs([]))
+      .then((data: Doc[]) => {
+        setDocs(data);
+        cacheSet(docListKey, data, 30 * 60 * 1000); // 30 分钟 TTL
+      })
+      .catch(() => {
+        if (!cached) setDocs([]);
+      })
       .finally(() => setLoading(false));
+  }, []);
+
+  /* hover 防抖：避免鼠标快速划过每张卡片都发请求 */
+  const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleCardHover = useCallback((docId: string) => {
+    if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
+    /* 停留超过 120ms 才判断为"用户可能要点"，开始预拉 */
+    hoverTimerRef.current = setTimeout(() => {
+      prefetchDoc(docId);
+    }, 120);
+  }, []);
+  const handleCardLeave = useCallback(() => {
+    if (hoverTimerRef.current) {
+      clearTimeout(hoverTimerRef.current);
+      hoverTimerRef.current = null;
+    }
   }, []);
 
   /* 构建 Fuse 搜索实例 */
@@ -96,6 +131,7 @@ export default function HomePage() {
               alt="TeachHub Logo"
               width={36}
               height={36}
+              priority
               className="rounded-full"
             />
             <span className="text-base font-medium text-[#4a4a4a] tracking-wide hidden sm:inline">
@@ -183,6 +219,11 @@ export default function HomePage() {
                         <Link
                           key={doc.id}
                           href={`/doc/${doc.id}`}
+                          prefetch={true}
+                          onMouseEnter={() => handleCardHover(doc.id)}
+                          onMouseLeave={handleCardLeave}
+                          /* 移动端：触摸按下就开始预拉（比 click 早 100-300ms） */
+                          onTouchStart={() => prefetchDoc(doc.id)}
                           className="group block bg-white rounded-xl border border-[#eae7e0] p-5
                                      shadow-[0_1px_3px_rgba(0,0,0,0.04)]
                                      hover:shadow-[0_4px_16px_rgba(0,0,0,0.06)]
