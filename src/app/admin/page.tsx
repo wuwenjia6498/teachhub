@@ -1,8 +1,21 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect } from "react";
-import { Upload, CheckCircle, AlertCircle, Loader2, Home, Trash2, Lock } from "lucide-react";
+import {
+  Upload,
+  CheckCircle,
+  AlertCircle,
+  Loader2,
+  Home,
+  Trash2,
+  Lock,
+  ExternalLink,
+  Pencil,
+  Check,
+  X,
+} from "lucide-react";
 import Link from "next/link";
+import { cacheDel, docListKey, docKey } from "@/lib/clientCache";
 
 interface DocItem {
   id: string;
@@ -12,6 +25,12 @@ interface DocItem {
 }
 
 type UploadState = "idle" | "dragging" | "uploading" | "success" | "error";
+
+/** 行内编辑表单的暂存值 */
+interface EditDraft {
+  title: string;
+  date: string;
+}
 
 export default function AdminPage() {
   const [authed, setAuthed] = useState(false);
@@ -25,6 +44,13 @@ export default function AdminPage() {
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  /* 正在编辑的文档 id + 其暂存的表单值 */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<EditDraft>({ title: "", date: "" });
+  const [savingId, setSavingId] = useState<string | null>(null);
+  const [editError, setEditError] = useState("");
+
   const inputRef = useRef<HTMLInputElement>(null);
 
   /* 检查是否已登录 */
@@ -70,10 +96,64 @@ export default function AdminPage() {
       const res = await fetch(`/api/docs/${id}`, { method: "DELETE" });
       if (res.ok) {
         setDocs((prev) => prev.filter((d) => d.id !== id));
+        /* 首页列表 / 单篇详情缓存同步失效，避免返回首页看到旧数据 */
+        cacheDel(docListKey);
+        cacheDel(docKey(id));
       }
     } catch { /* 静默 */ }
     setDeletingId(null);
   }, []);
+
+  /* 打开行内编辑表单：填入当前 title/date 作为初值 */
+  const startEdit = useCallback((doc: DocItem) => {
+    setEditingId(doc.id);
+    setEditDraft({ title: doc.title, date: doc.date });
+    setEditError("");
+  }, []);
+
+  /* 关闭行内编辑（不保存） */
+  const cancelEdit = useCallback(() => {
+    setEditingId(null);
+    setEditError("");
+  }, []);
+
+  /* 保存编辑：PATCH 后本地乐观更新，并清首页缓存 */
+  const handleSaveEdit = useCallback(async (id: string) => {
+    const title = editDraft.title.trim();
+    const date = editDraft.date.trim();
+
+    if (!title) { setEditError("标题不能为空"); return; }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      setEditError("日期格式应为 YYYY-MM-DD");
+      return;
+    }
+
+    setSavingId(id);
+    setEditError("");
+    try {
+      const res = await fetch(`/api/docs/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, date }),
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setDocs((prev) =>
+          prev.map((d) => (d.id === id ? { ...d, title, date } : d)),
+        );
+        /* 首页列表 / 单篇详情客户端缓存失效，回到首页能立即看到新值 */
+        cacheDel(docListKey);
+        cacheDel(docKey(id));
+        setEditingId(null);
+      } else {
+        setEditError(data.error || "保存失败");
+      }
+    } catch {
+      setEditError("网络错误，请重试");
+    }
+    setSavingId(null);
+  }, [editDraft]);
 
   /* 处理文件上传 */
   const handleUpload = useCallback(async (file: File, date: string) => {
@@ -363,30 +443,121 @@ export default function AdminPage() {
               已上传文档（{docs.length} 篇）
             </h2>
             <div className="space-y-2">
-              {docs.map((doc) => (
-                <div
-                  key={doc.id}
-                  className="flex items-center gap-3 px-4 py-3 bg-white rounded-xl border border-[#eae7e0]"
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-[#3d3d3d] truncate">{doc.title}</p>
-                    <p className="text-xs text-[#b0a898] mt-0.5">{doc.date}</p>
-                  </div>
-                  <button
-                    onClick={() => handleDelete(doc.id, doc.title)}
-                    disabled={deletingId === doc.id}
-                    className="shrink-0 p-2 rounded-lg text-[#c0a0a0] hover:text-[#ab7a7a] hover:bg-[#faf5f5]
-                               disabled:opacity-40 disabled:cursor-wait transition-colors"
-                    title="删除此文档"
+              {docs.map((doc) => {
+                const isEditing = editingId === doc.id;
+                const isSaving = savingId === doc.id;
+
+                return (
+                  <div
+                    key={doc.id}
+                    className="px-4 py-3 bg-white rounded-xl border border-[#eae7e0]"
                   >
-                    {deletingId === doc.id ? (
-                      <Loader2 size={16} className="animate-spin" />
-                    ) : (
-                      <Trash2 size={16} />
+                    {/* 非编辑态：标题 + 日期 + 3 个行动按钮 */}
+                    {!isEditing && (
+                      <div className="flex items-center gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm text-[#3d3d3d] truncate">{doc.title}</p>
+                          <p className="text-xs text-[#b0a898] mt-0.5">{doc.date}</p>
+                        </div>
+
+                        {/* 查看原文：新标签页打开详情页（不支持下载，只在线预览） */}
+                        <Link
+                          href={`/doc/${doc.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="shrink-0 p-2 rounded-lg text-[#9ab0a5] hover:text-[#6a8a7a] hover:bg-[#f1f5f2] transition-colors"
+                          title="在新标签页查看原文"
+                        >
+                          <ExternalLink size={16} />
+                        </Link>
+
+                        {/* 编辑 */}
+                        <button
+                          onClick={() => startEdit(doc)}
+                          className="shrink-0 p-2 rounded-lg text-[#9aa5b0] hover:text-[#6a7a8a] hover:bg-[#f1f3f5] transition-colors"
+                          title="编辑标题和分享日期"
+                        >
+                          <Pencil size={16} />
+                        </button>
+
+                        {/* 删除 */}
+                        <button
+                          onClick={() => handleDelete(doc.id, doc.title)}
+                          disabled={deletingId === doc.id}
+                          className="shrink-0 p-2 rounded-lg text-[#c0a0a0] hover:text-[#ab7a7a] hover:bg-[#faf5f5]
+                                     disabled:opacity-40 disabled:cursor-wait transition-colors"
+                          title="删除此文档"
+                        >
+                          {deletingId === doc.id ? (
+                            <Loader2 size={16} className="animate-spin" />
+                          ) : (
+                            <Trash2 size={16} />
+                          )}
+                        </button>
+                      </div>
                     )}
-                  </button>
-                </div>
-              ))}
+
+                    {/* 编辑态：行内表单，保存写回后关闭 */}
+                    {isEditing && (
+                      <div className="flex flex-col gap-2">
+                        <input
+                          type="text"
+                          value={editDraft.title}
+                          onChange={(e) =>
+                            setEditDraft((d) => ({ ...d, title: e.target.value }))
+                          }
+                          placeholder="标题"
+                          className="w-full px-3 py-2 rounded-lg border border-[#e0ddd6]
+                                     text-sm text-[#3d3d3d]
+                                     focus:outline-none focus:border-[#a8c5b8] focus:ring-2 focus:ring-[#a8c5b8]/20
+                                     transition-all"
+                        />
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="date"
+                            value={editDraft.date}
+                            onChange={(e) =>
+                              setEditDraft((d) => ({ ...d, date: e.target.value }))
+                            }
+                            className="flex-1 px-3 py-2 rounded-lg border border-[#e0ddd6]
+                                       text-sm text-[#3d3d3d]
+                                       focus:outline-none focus:border-[#a8c5b8] focus:ring-2 focus:ring-[#a8c5b8]/20
+                                       transition-all"
+                          />
+
+                          <button
+                            onClick={() => handleSaveEdit(doc.id)}
+                            disabled={isSaving}
+                            className="shrink-0 p-2 rounded-lg text-[#7aab8e] hover:text-[#5a8b6e] hover:bg-[#f0f5f1]
+                                       disabled:opacity-40 disabled:cursor-wait transition-colors"
+                            title="保存"
+                          >
+                            {isSaving ? (
+                              <Loader2 size={16} className="animate-spin" />
+                            ) : (
+                              <Check size={16} />
+                            )}
+                          </button>
+
+                          <button
+                            onClick={cancelEdit}
+                            disabled={isSaving}
+                            className="shrink-0 p-2 rounded-lg text-[#aaa] hover:text-[#6a6a6a] hover:bg-[#f3f2ef]
+                                       disabled:opacity-40 transition-colors"
+                            title="取消"
+                          >
+                            <X size={16} />
+                          </button>
+                        </div>
+
+                        {editError && (
+                          <p className="text-xs text-[#ab7a7a]">{editError}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}

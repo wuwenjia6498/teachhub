@@ -168,6 +168,58 @@ export async function updateDocContent(id: string, content: string): Promise<voi
   memInvalidate(`doc:${id}`);
 }
 
+/**
+ * 更新文档的 title / date（分享日期与标题），不触碰正文 & summary。
+ *
+ * 需要同时更新两处：
+ *   1. doc:{id}     —— 详情页读的是这个
+ *   2. docs:index   —— 首页/搜索/管理列表读的是这个
+ * 任一处没更新，就会出现"首页显示旧标题 / 详情页显示新标题"的错位。
+ *
+ * @throws 文档不存在时抛 `doc {id} not found`
+ */
+export async function updateDocMeta(
+  id: string,
+  patch: { title?: string; date?: string },
+): Promise<DocMeta> {
+  const key = `doc:${id}`;
+  const raw = await kv.get<Doc>(key);
+  if (!raw) throw new Error(`doc ${id} not found`);
+
+  /* 只接收两个字段；其它字段保持原样，防止误写入 */
+  const nextTitle = (patch.title ?? raw.title).trim();
+  const nextDate = (patch.date ?? raw.date).trim();
+
+  if (!nextTitle) throw new Error("title 不能为空");
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(nextDate)) {
+    throw new Error("date 必须是 YYYY-MM-DD 格式");
+  }
+
+  /* 更新 doc:{id}：content 是已压缩状态，原样保留 */
+  const nextDoc: Doc = { ...raw, title: nextTitle, date: nextDate };
+  await kv.set(key, nextDoc);
+
+  /* 同步更新 docs:index 里对应条目 */
+  const index = (await kv.get<DocMeta[]>(INDEX_KEY)) ?? [];
+  const idx = index.findIndex((d) => d.id === id);
+  if (idx >= 0) {
+    index[idx] = {
+      ...index[idx],
+      title: nextTitle,
+      date: nextDate,
+    };
+    await kv.set(INDEX_KEY, index);
+  }
+
+  /* 失效所有相关缓存 */
+  memInvalidate("index");
+  memInvalidate(`doc:${id}`);
+  revalidateTag(CACHE_TAG_INDEX);
+
+  const { content: _omit, ...metaOut } = nextDoc;
+  return metaOut;
+}
+
 /** 按 id 删除文档；成功返回 true，不存在返回 false */
 export async function deleteDoc(id: string): Promise<boolean> {
   const index = await readDocsMeta();
