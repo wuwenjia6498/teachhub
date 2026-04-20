@@ -1,21 +1,64 @@
-import { NextRequest, NextResponse, after } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import mammoth from "mammoth";
 import { del } from "@vercel/blob";
 import type { Doc } from "@/types/doc";
-import { prependDoc, updateDocSummary } from "@/lib/docs";
+import { prependDoc } from "@/lib/docs";
 import { uploadImage } from "@/lib/imageStorage";
-import { generateSummary, extractPlainText } from "@/lib/summaries";
 
 /* ============================================================================
  * Route Segment Config
  * ----------------------------------------------------------------------------
  * - runtime = 'nodejs'：mammoth 依赖 Node API（Buffer / zlib），不能跑 Edge
  * - maxDuration = 60：Vercel Hobby 计划允许的最长函数执行时间（秒）。
- *   用户感知时长 = 解析 docx + 图片并发上传 Blob + 写 Redis（通常 5-15 秒）
- *   after() 里的 AI 摘要生成也计入这个 60 秒预算，但用户已经不用等了。
+ *   用户感知时长 = 解析 docx + 图片并发上传 Blob + AI 摘要 + 写 Redis（通常 8-20 秒）。
+ *   摘要生成放在主流程里保证稳定性，避免 after() 在 serverless worker 被提前
+ *   回收时静默失败。60 秒足以覆盖 aihubmix 的最坏响应时间。
  * ========================================================================== */
 export const runtime = "nodejs";
 export const maxDuration = 60;
+
+const AIHUBMIX_API_URL = "https://aihubmix.com/v1/chat/completions";
+const AIHUBMIX_MODEL = "gemini-2.5-flash";
+
+/**
+ * 调用 AIHUBMIX Gemini 生成文档核心摘要
+ * 若 API Key 未配置或调用失败，静默回退返回空字符串
+ */
+async function generateSummary(plainText: string): Promise<string> {
+  const apiKey = process.env.AIHUBMIX_API_KEY;
+  if (!apiKey) return "";
+
+  try {
+    const res = await fetch(AIHUBMIX_API_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: AIHUBMIX_MODEL,
+        messages: [
+          {
+            role: "system",
+            content:
+              '你是文档摘要助手。请以"本次分享"开头，用一两句话概括以下文档的核心内容与要点，不超过80字，语言简洁专业。不要输出任何思考过程，直接给出摘要。',
+          },
+          { role: "user", content: plainText.slice(0, 4000) },
+        ],
+        temperature: 0.3,
+        max_tokens: 1024,
+      }),
+    });
+
+    if (!res.ok) return "";
+
+    const data = await res.json();
+    return (data.choices?.[0]?.message?.content ?? "").trim();
+  } catch (err) {
+    console.error("AI 摘要生成失败，将使用默认截取:", err);
+    return "";
+  }
+}
 
 /* ============================================================================
  * POST /api/upload
@@ -113,42 +156,28 @@ export async function POST(req: NextRequest) {
         : new Date().toISOString().split("T")[0];
     const id = String(Date.now());
 
-    /* summary 先留空：AI 摘要放到 after() 里异步生成，不阻塞用户响应。
-     * 这样用户能在几秒内看到 "已入库"，摘要十几秒后自动补齐。 */
-    const newDoc: Doc = { id, date, title, content: htmlContent, summary: "" };
+    /* ---------- 5. 同步生成 AI 摘要 ----------
+     * 放在入库前串行执行，响应返回时 summary 已落库。
+     * 权衡：用户上传等待时间从 3-5 秒变成 8-20 秒，换来"摘要 100% 不丢"的稳定性。
+     * generateSummary 内部 try/catch 兜底：AI 失败时返回空串，此时文档仍然入库，
+     * 只是 summary 为空——可以事后用 /api/admin/backfill-summaries 手动补齐。 */
+    const plainText = htmlContent.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    const summary = await generateSummary(plainText);
 
-    /* ---------- 5. 写入 Redis ---------- */
+    /* ---------- 6. 拼接最终文档并写入 Redis ---------- */
+    const newDoc: Doc = { id, date, title, content: htmlContent, summary };
     await prependDoc(newDoc);
 
-    /* ---------- 6. 清理：删除临时 docx Blob（失败只记日志，不影响用户结果） ---------- */
+    /* ---------- 7. 清理：删除临时 docx Blob（失败只记日志，不影响用户结果） ---------- */
     try {
       await del(blobUrl);
     } catch (err) {
       console.error("删除临时 docx Blob 失败（忽略）:", err);
     }
 
-    /* ---------- 7. 后台生成 AI 摘要（响应返回后继续执行） ----------
-     * Next.js 15 的 after() 保证在 res 发给客户端之后仍然能跑完这块代码，
-     * 同时不算进用户感知的接口耗时。失败也不影响用户：
-     *   - 摘要先留空值
-     *   - Vercel Cron（/api/cron/backfill-summaries）每 6 小时自动扫漏补齐
-     *   - 或者管理员手动调 /api/admin/backfill-summaries 立刻补齐
-     */
-    const plainText = extractPlainText(htmlContent);
-    after(async () => {
-      try {
-        const summary = await generateSummary(plainText);
-        await updateDocSummary(id, summary);
-      } catch (err) {
-        console.error("[after] AI 摘要后台生成失败（将由 cron 稍后补齐）:", err);
-      }
-    });
-
-    /* 立刻返回，前端不再等摘要（原本常 5-20 秒） */
     return NextResponse.json({
       success: true,
-      doc: { id, date, title, summary: "" },
-      summaryPending: true, /* 前端可据此文案提示 "摘要稍后生成" */
+      doc: { id, date, title, summary },
     });
   } catch (err) {
     console.error("上传解析失败:", err);

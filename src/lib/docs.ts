@@ -230,46 +230,6 @@ export async function updateDocMeta(
 }
 
 /**
- * 仅更新文档的 summary 字段（AI 摘要），不触碰正文 / 标题 / 日期。
- *
- * 使用场景：上传流程里摘要生成耗时（Gemini 调用常 5-20s），
- * 为缩短用户等待，先把 summary 以空串入库 → 立刻返回成功，
- * 再由 Next.js 15 的 after() 在响应返回后继续调 Gemini，
- * 生成完成后回调本函数把 summary 补齐。
- *
- * 同 updateDocMeta 一样，要同时更新两处，否则首页 / 详情页会出现不一致：
- *   1. doc:{id}    —— 详情页读取的源
- *   2. docs:index  —— 首页 / 搜索用的元信息数组
- *
- * 调用者通常忽略抛错（后台任务失败不影响主流程，用户已拿到成功响应）。
- */
-export async function updateDocSummary(id: string, summary: string): Promise<void> {
-  const trimmed = (summary ?? "").trim();
-  if (!trimmed) return; /* 摘要生成失败 → 保持原空值，下次上传同文档会再试 */
-
-  const key = `doc:${id}`;
-  const raw = await kv.get<Doc>(key);
-  if (!raw) return; /* 文档已被删除，没必要写回 */
-
-  /* 更新 doc:{id}：content 是已压缩状态，原样保留 */
-  const nextDoc: Doc = { ...raw, summary: trimmed };
-  await kv.set(key, nextDoc);
-
-  /* 同步更新 docs:index 对应条目里的 summary */
-  const index = (await kv.get<DocMeta[]>(INDEX_KEY)) ?? [];
-  const idx = index.findIndex((d) => d.id === id);
-  if (idx >= 0) {
-    index[idx] = { ...index[idx], summary: trimmed };
-    await kv.set(INDEX_KEY, index);
-  }
-
-  /* 失效缓存，首页 / 详情页下一次读取拿到新摘要 */
-  memInvalidate("index");
-  memInvalidate(`doc:${id}`);
-  revalidateTag(CACHE_TAG_INDEX);
-}
-
-/**
  * 按 id 删除文档；成功返回 true，不存在返回 false。
  *
  * 同 prependDoc：**写入前直读 Redis 拿最新索引**，不走缓存。否则两端交替

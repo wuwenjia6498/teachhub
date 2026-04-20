@@ -203,10 +203,12 @@ export default function AdminPage() {
         },
       });
 
-      /* Step 2. 触发服务端解析入库 —— 只传 URL + 元数据，几百字节 */
+      /* Step 2. 触发服务端解析入库 —— 只传 URL + 元数据，几百字节。
+       * 服务端会同步执行：解析 docx → 图片外置 → AI 生成摘要 → 写 Redis。
+       * 这一步通常 8-20 秒（视文档大小 / 图片数量 / AI 响应时长），用户需要等待。*/
       setPhase("parsing");
       setUploadPercent(100);
-      setMessage("文件已上传，正在解析文档...");
+      setMessage("文件已上传，正在解析文档并生成摘要...");
       const res = await fetch("/api/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -220,12 +222,7 @@ export default function AdminPage() {
 
       if (res.ok && data.success) {
         setState("success");
-        /* summaryPending 为 true：后台还在生成摘要，给用户明确的文案预期 */
-        setMessage(
-          data.summaryPending
-            ? `更新成功，已添加「${data.doc.title}」至首页。摘要将在约 10-20 秒后自动生成。`
-            : `更新成功，已添加「${data.doc.title}」至首页。`,
-        );
+        setMessage(`更新成功，已添加「${data.doc.title}」至首页。`);
         setPendingFile(null);
         /* 首页列表客户端缓存失效，保证返回首页能立刻看到新文档 */
         cacheDel(docListKey);
