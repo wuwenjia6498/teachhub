@@ -38,7 +38,8 @@ const CACHE_TAG_INDEX = "docs-index";
 /** 用 SCAN 分页拉取 doc:* 的全部 key；相比 KEYS 更安全，数据再多也不阻塞 Redis */
 async function scanAllDocKeys(): Promise<string[]> {
   const keys: string[] = [];
-  let cursor: string | number = 0;
+  /* Upstash Redis 的 scan cursor 全程用 string 表示，首次传 "0" 即可 */
+  let cursor = "0";
   do {
     /* @upstash/redis 的 scan 返回 [cursor, keys[]] */
     const [nextCursor, batch] = (await kv.scan(cursor, {
@@ -47,8 +48,8 @@ async function scanAllDocKeys(): Promise<string[]> {
     })) as [string, string[]];
     keys.push(...batch);
     cursor = nextCursor;
-    /* cursor === "0"（字符串零）表示已遍历完 */
-  } while (cursor !== "0" && cursor !== 0);
+    /* cursor 回到 "0" 表示遍历结束（首次和终止用同一哨兵值） */
+  } while (cursor !== "0");
   return keys;
 }
 
