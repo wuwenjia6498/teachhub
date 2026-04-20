@@ -44,51 +44,29 @@ function decompressContent(content: string | undefined | null): string {
 }
 
 /* ==========================================================================
- * 进程级内存 TTL 缓存
+ * 缓存策略说明（2026-04 二次修订）
  * --------------------------------------------------------------------------
- * unstable_cache 在 dev 模式下可能失效；在 Vercel serverless 冷启动时也要重建。
- * 这里用一个模块级 Map 做毫秒级本地缓存（默认 60s TTL），同一进程内的重复请求
- * 几乎 0 开销。适合"内容低频变动、读极多"的教研文档场景。
- * ========================================================================== */
-type CacheEntry<T> = { value: T; expireAt: number };
-const memCache = new Map<string, CacheEntry<unknown>>();
-const MEM_TTL_MS = 60_000; // 60 秒足以覆盖常见的连续点击/刷新
-
-function memGet<T>(key: string): T | undefined {
-  const hit = memCache.get(key);
-  if (!hit) return undefined;
-  if (hit.expireAt < Date.now()) {
-    memCache.delete(key);
-    return undefined;
-  }
-  return hit.value as T;
-}
-
-function memSet<T>(key: string, value: T, ttl = MEM_TTL_MS) {
-  memCache.set(key, { value, expireAt: Date.now() + ttl });
-}
-
-function memInvalidate(prefix: string) {
-  for (const k of memCache.keys()) {
-    if (k.startsWith(prefix)) memCache.delete(k);
-  }
-}
-
-/* ==========================================================================
- * 对外 API
+ * 曾经这里有一个"进程级内存 Map"（memCache），用于给 getDocById 做 60s TTL
+ * 的跨请求缓存。但在 Vercel 多 warm 实例环境下，这会引入严重的一致性问题：
+ *
+ *   实例 A 上触发写操作后，只能清掉 A 自己的 memCache；
+ *   请求一旦随机落到实例 B，就可能读到 B 残留的旧数据（直到 B 的 TTL 过期）。
+ *
+ * 症状：管理员编辑完标题/上传完新文档，点进详情页看到的**还是旧的**，
+ *       甚至需要过 60 秒才"忽然"变新。
+ *
+ * 结论：彻底移除 memCache。代价可接受——
+ *   - 详情页走 ISR（revalidate=3600），99% 请求命中 CDN 静态 HTML，不碰 Redis
+ *   - 只有 ISR 失效后的第一次 SSR 走 Redis，单次 GET ~30-80ms
+ *   - 列表接口 /api/docs 仍由 unstable_cache + revalidateTag 兜底（全局一致）
  * ========================================================================== */
 
 /**
  * 读取全部元信息列表；失败时返回空数组
  *
- * 缓存策略（2026-04 修订）：
- *   - 只保留 Next.js 的 unstable_cache（tag-based，revalidateTag 能**全局**失效）
- *   - **不再用**实例本地 memCache 缓存 index
- *     原因：memCache 是进程级 Map，实例 A 写后只清 A 的，实例 B 仍持旧数据
- *     60 秒；Vercel 多 warm 实例下 "编辑后 fetch 看不到新数据" 就是这来的。
- *     index 本身很小（几十条 meta），直接走 Redis 影响可忽略。
- *   - getDocById 保留 memCache，因为单文档内容大、修改频率低，跨实例一致性
- *     要求低（SSR 的 ISR 已是权威）。
+ * 缓存策略：只走 Next.js 的 unstable_cache（tag-based，revalidateTag 能**全局**
+ * 失效）。不使用实例本地内存缓存——在 Vercel 多 warm 实例下，本地 Map 的失效
+ * 无法跨实例，会导致"编辑后 fetch 看不到新数据"的幽灵 bug。
  */
 export const readDocsMeta = unstable_cache(
   async (): Promise<DocMeta[]> => {
@@ -113,25 +91,20 @@ export async function readSortedDocsMeta(): Promise<DocMeta[]> {
  * 根据 id 获取完整文档（含 content）；不存在时返回 null
  *
  * 缓存策略：
- * 1. React cache()：**同一次请求**内被多次调用时（如 generateMetadata + 页面组件）
- *    只真正执行一次，避免重复 IO。
- * 2. 进程内存 Map：跨请求的结果复用，60s TTL。
+ *   - React cache()：**同一次请求**内被多次调用时（如 generateMetadata + 页面组件）
+ *     只真正执行一次，避免重复 IO。这是请求作用域的，不跨请求、不跨实例，安全。
+ *   - 跨请求缓存交给上层的 ISR（revalidate=3600）——页面级静态 HTML 才是真正的
+ *     性能杠杆，Redis 直读只在 ISR 失效后发生。
  *
- * 说明：没有用 Next.js 的 unstable_cache，因为它有 2MB/条 的上限，
- * 而教研文档含 base64 图片时单篇常常超过 2MB，包一层反而静默失败。
- * 页面级的 ISR (revalidate) 仍在，仍然能给 HTML 输出做静态缓存。
+ * 为什么不用 Next.js 的 unstable_cache：它有 2MB/条 的上限，而教研文档含图片时
+ * 单篇可能超过 2MB，包一层反而静默失败。externalized image 虽已让绝大多数文档
+ * 变小，但保守起见继续让 ISR 做缓存层。
  */
 export const getDocById = reactCache(async (id: string): Promise<Doc | null> => {
-  const key = `doc:${id}`;
-  const cached = memGet<Doc>(key);
-  if (cached) return cached;
-
   try {
-    const raw = await kv.get<Doc>(key);
+    const raw = await kv.get<Doc>(`doc:${id}`);
     if (!raw) return null;
-    const decoded: Doc = { ...raw, content: decompressContent(raw.content) };
-    memSet(key, decoded);
-    return decoded;
+    return { ...raw, content: decompressContent(raw.content) };
   } catch {
     return null;
   }
@@ -140,12 +113,10 @@ export const getDocById = reactCache(async (id: string): Promise<Doc | null> => 
 /**
  * 将新文档插入 KV：全文存 doc:{id}（content 压缩后存），元信息追加到索引头部。
  *
- * 【并发安全】读旧索引时**必须直读 Redis**，不能走 memCache / unstable_cache。
- * 否则在下列场景会触发 lost update：
- *   - 多 Vercel warm 实例同时收到上传请求，各自 memCache 持有不同快照
- *   - 本地 dev 和生产共用同一 Redis，两端交替上传（memCache 互不感知）
- * 代价是每次上传多一次 Redis GET（~30-80ms），而上传本就是低频操作，代价可忽略。
- * 读取路径（首页 / 详情页）仍然走缓存，性能不受影响。
+ * 【并发安全】读旧索引时**必须直读 Redis**，不能走 unstable_cache。
+ * 否则多 Vercel warm 实例同时上传时会触发 lost update：两端各拿到一份旧索引，
+ * 分别 append 自己的文档，后写者覆盖掉先写者。代价是每次上传多一次 Redis GET
+ * (~30-80ms)，上传本就是低频操作，可忽略。
  */
 export async function prependDoc(doc: Doc): Promise<void> {
   const { content: _content, ...meta } = doc;
@@ -163,10 +134,8 @@ export async function prependDoc(doc: Doc): Promise<void> {
   ]);
 
   /* 失效所有相关缓存层：
-   * - memCache[doc:{id}]：该实例本地读取时立即生效
    * - unstable_cache(tag=docs-index)：全局所有实例下次 readDocsMeta 时回源
    * - revalidatePath("/") + "/doc/{id}"：让 ISR 预渲染的静态 HTML 立刻失效 */
-  memInvalidate(`doc:${doc.id}`);
   revalidateTag(CACHE_TAG_INDEX);
   revalidatePath("/");
   revalidatePath(`/doc/${doc.id}`);
@@ -185,8 +154,7 @@ export async function updateDocContent(id: string, content: string): Promise<voi
   const updated: Doc = { ...raw, content: compressContent(content) };
   await kv.set(key, updated);
 
-  /* 本地缓存 + ISR 静态 HTML 都失效，下次读拿到最新 */
-  memInvalidate(`doc:${id}`);
+  /* ISR 静态 HTML 失效，下次访问触发 SSR 拿到最新 */
   revalidatePath(`/doc/${id}`);
 }
 
@@ -234,7 +202,6 @@ export async function updateDocMeta(
   }
 
   /* 失效所有相关缓存：见 prependDoc 同名注释 */
-  memInvalidate(`doc:${id}`);
   revalidateTag(CACHE_TAG_INDEX);
   revalidatePath("/");
   revalidatePath(`/doc/${id}`);
@@ -260,7 +227,6 @@ export async function deleteDoc(id: string): Promise<boolean> {
     kv.del(`doc:${id}`),
   ]);
 
-  memInvalidate(`doc:${id}`);
   revalidateTag(CACHE_TAG_INDEX);
   revalidatePath("/");
   revalidatePath(`/doc/${id}`);
