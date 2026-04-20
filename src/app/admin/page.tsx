@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
+import { upload } from "@vercel/blob/client";
 import { cacheDel, docListKey, docKey } from "@/lib/clientCache";
 
 interface DocItem {
@@ -155,7 +156,17 @@ export default function AdminPage() {
     setSavingId(null);
   }, [editDraft]);
 
-  /* 处理文件上传 */
+  /* ==========================================================================
+   * 文件上传（客户端直传 Vercel Blob + 服务端异步解析）
+   * --------------------------------------------------------------------------
+   * 旧做法：FormData 直接 POST 到 /api/upload，受 Vercel 4.5MB 请求体限制，
+   *         带图 Word 文档在生产环境常报 "网络连接错误"。
+   * 新做法：
+   *   1. @vercel/blob/client 的 upload() 把 .docx 从浏览器直传到 Vercel Blob
+   *      （中转经过 /api/upload/blob-token 签一次短期 token，不占用函数执行时长）
+   *   2. 拿到 Blob URL 后，再 POST 一个轻量 JSON 到 /api/upload 触发解析
+   *   3. 函数从 Blob 拉回 docx buffer 处理，完成后自动删除临时文件
+   * ======================================================================== */
   const handleUpload = useCallback(async (file: File, date: string) => {
     if (!file.name.endsWith(".docx")) {
       setState("error");
@@ -169,28 +180,47 @@ export default function AdminPage() {
     }
 
     setState("uploading");
-    setMessage("正在解析并更新库...");
+    setMessage("正在上传文件...");
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("date", date);
+      /* Step 1. 客户端直传到 Vercel Blob（无 4.5MB 限制，支持进度感知） */
+      const blob = await upload(`uploads/${file.name}`, file, {
+        access: "public",
+        handleUploadUrl: "/api/upload/blob-token",
+        contentType:
+          file.type ||
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      });
 
-      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      /* Step 2. 触发服务端解析入库 —— 只传 URL + 元数据，几百字节 */
+      setMessage("文件已上传，正在解析并生成摘要...");
+      const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          blobUrl: blob.url,
+          date,
+          title: file.name.replace(/\.docx$/i, ""),
+        }),
+      });
       const data = await res.json();
 
       if (res.ok && data.success) {
         setState("success");
         setMessage(`更新成功，已添加「${data.doc.title}」至首页`);
         setPendingFile(null);
+        /* 首页列表客户端缓存失效，保证返回首页能立刻看到新文档 */
+        cacheDel(docListKey);
         fetchDocs();
       } else {
         setState("error");
         setMessage(data.error || "上传失败，请重试");
       }
-    } catch {
+    } catch (err) {
+      /* upload() 抛错时也走到这里：未登录 / 文件类型不对 / 超过 50MB / 网络中断 */
       setState("error");
-      setMessage("网络错误，请检查连接后重试");
+      const msg = err instanceof Error ? err.message : "";
+      setMessage(msg ? `上传失败：${msg}` : "网络错误，请检查连接后重试");
     }
   }, [fetchDocs]);
 

@@ -1,8 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import mammoth from "mammoth";
+import { del } from "@vercel/blob";
 import type { Doc } from "@/types/doc";
 import { prependDoc } from "@/lib/docs";
 import { uploadImage } from "@/lib/imageStorage";
+
+/* ============================================================================
+ * Route Segment Config
+ * ----------------------------------------------------------------------------
+ * - runtime = 'nodejs'：mammoth 依赖 Node API，不能跑 Edge
+ * - maxDuration = 60：Vercel Hobby 计划允许的最长函数执行时间（秒）。
+ *   解析大 docx + 并发上传图片 + 调 Gemini 摘要 + 写 Redis，链路较长，
+ *   默认 10 秒经常不够。拉到 60s 能覆盖 95% 以上的真实文档。
+ * ========================================================================== */
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const AIHUBMIX_API_URL = "https://aihubmix.com/v1/chat/completions";
 const AIHUBMIX_MODEL = "gemini-2.5-flash";
@@ -47,24 +59,64 @@ async function generateSummary(plainText: string): Promise<string> {
   }
 }
 
-/* POST /api/upload — 接收 .docx 文件，解析后写入 Vercel KV */
+/* ============================================================================
+ * POST /api/upload
+ * ----------------------------------------------------------------------------
+ * 改造要点（2026-04）：
+ *   旧：前端把 .docx 以 FormData 直接 POST 到这里
+ *       —— 受 Vercel 4.5MB 请求体限制，超过 4-5MB 的文档在生产端失败
+ *   新：前端先把 .docx 直传到 Vercel Blob（@vercel/blob/client 的 upload()），
+ *       拿到临时 Blob URL 后，再 POST 一个小 JSON 到这里。本函数：
+ *         1. 从 Blob URL 把 docx 拉回 buffer（Vercel 内网 CDN，极快）
+ *         2. 走原来的 mammoth 解析 / 图片外置 / AI 摘要 / 写 Redis
+ *         3. 删除那个临时 docx Blob，避免占用存储配额
+ *
+ * 请求体：{ blobUrl: string, date?: "YYYY-MM-DD", title?: string }
+ *   - blobUrl: 前端直传后拿到的 Vercel Blob URL（必填）
+ *   - date:    人工选择的分享日期，默认今天
+ *   - title:   文档标题，默认从 blobUrl 文件名（去掉 .docx / 随机后缀）推断
+ * ========================================================================== */
 export async function POST(req: NextRequest) {
-  try {
-    const formData = await req.formData();
-    const file = formData.get("file") as File | null;
+  /* 鉴权：只有登录过 /admin 的用户才能触发解析入库 */
+  if (req.cookies.get("admin_auth")?.value !== "1") {
+    return NextResponse.json({ error: "未授权，请先登录管理后台" }, { status: 401 });
+  }
 
-    if (!file || !file.name.endsWith(".docx")) {
+  /* ---------- 1. 解析请求体，拿到临时 docx 的 Blob URL ---------- */
+  let blobUrl: string | undefined;
+  let inputDate: string | undefined;
+  let inputTitle: string | undefined;
+  try {
+    const body = await req.json();
+    blobUrl = typeof body?.blobUrl === "string" ? body.blobUrl : undefined;
+    inputDate = typeof body?.date === "string" ? body.date : undefined;
+    inputTitle = typeof body?.title === "string" ? body.title : undefined;
+  } catch {
+    return NextResponse.json({ error: "请求体格式错误，应为 JSON" }, { status: 400 });
+  }
+
+  if (!blobUrl) {
+    return NextResponse.json({ error: "缺少 blobUrl" }, { status: 400 });
+  }
+
+  /* 仅信任 Vercel Blob 域名的 URL，避免被当 SSRF 跳板 */
+  if (!/^https:\/\/[a-z0-9-]+\.public\.blob\.vercel-storage\.com\//i.test(blobUrl)) {
+    return NextResponse.json({ error: "blobUrl 非法" }, { status: 400 });
+  }
+
+  try {
+    /* ---------- 2. 从 Blob 拉回 docx buffer ---------- */
+    const fileRes = await fetch(blobUrl);
+    if (!fileRes.ok) {
       return NextResponse.json(
-        { error: "请上传 .docx 格式的文件" },
-        { status: 400 }
+        { error: `拉取 Blob 失败：${fileRes.status}` },
+        { status: 500 },
       );
     }
-
-    /* 将 File 转为 Buffer 供 mammoth 解析 */
-    const arrayBuffer = await file.arrayBuffer();
+    const arrayBuffer = await fileRes.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    /* 使用 mammoth 将 docx 转为 HTML，保留基础格式
+    /* ---------- 3. mammoth 解析 docx → HTML，图片实时外置到 Blob ----------
      * 关键优化：docx 内嵌的图片不再编进 base64（会让 HTML 膨胀到几 MB），
      * 而是直接上传到 Vercel Blob，HTML 里只留 <img src="https://..."> 的引用。
      * 效果：单篇文档 HTML 通常从 2-3MB 降到 50-200KB。
@@ -88,15 +140,19 @@ export async function POST(req: NextRequest) {
     );
     const htmlContent = result.value;
 
-    /* 从文件名提取标题（去掉 .docx 后缀） */
-    const title = file.name.replace(/\.docx$/i, "");
+    /* ---------- 4. 生成标题 / 摘要 / 日期 ---------- */
+    /* 标题优先用前端传的（原始文件名 -> 去 .docx）；否则从 URL 兜底 */
+    const title =
+      (inputTitle ?? "").replace(/\.docx$/i, "").trim() ||
+      decodeURIComponent(
+        blobUrl.split("/").pop() ?? "未命名",
+      ).replace(/\.docx$/i, "").replace(/-[A-Za-z0-9]{8,}$/, "");
 
     /* 提取纯文本用于 AI 摘要 */
     const plainText = htmlContent.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
     const summary = await generateSummary(plainText);
 
     /* 分享日期：优先使用前端传入的人工选择日期，否则取当前日期 */
-    const inputDate = formData.get("date") as string | null;
     const date =
       inputDate && /^\d{4}-\d{2}-\d{2}$/.test(inputDate)
         ? inputDate
@@ -105,15 +161,28 @@ export async function POST(req: NextRequest) {
 
     const newDoc: Doc = { id, date, title, content: htmlContent, summary };
 
-    /* 写入 Vercel KV */
+    /* ---------- 5. 写入 Redis ---------- */
     await prependDoc(newDoc);
+
+    /* ---------- 6. 清理：删除临时 docx Blob（失败只记日志，不影响用户结果） ---------- */
+    try {
+      await del(blobUrl);
+    } catch (err) {
+      console.error("删除临时 docx Blob 失败（忽略）:", err);
+    }
 
     return NextResponse.json({ success: true, doc: { id, date, title, summary } });
   } catch (err) {
     console.error("上传解析失败:", err);
+    /* 失败时也尽量清掉临时 docx，避免孤儿文件堆积 */
+    try {
+      await del(blobUrl);
+    } catch {
+      /* 忽略清理错误 */
+    }
     return NextResponse.json(
       { error: "文件解析失败，请确认文件格式正确" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

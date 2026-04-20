@@ -106,7 +106,8 @@ curl -X POST https://你的域名/api/migrate/extract-images \
 | `/api/docs` | GET | 返回全部文档元信息列表（不含正文，按时间倒序） |
 | `/api/docs/[id]` | GET | 返回单篇完整文档（含正文），带 `Cache-Control` 强缓存，供 hover 预拉 |
 | `/api/docs/[id]` | DELETE | 删除指定文档（需在管理页操作） |
-| `/api/upload` | POST | 接收 `.docx` 文件，解析正文 + 图片外置 Blob + AI 摘要后入 Redis |
+| `/api/upload/blob-token` | POST | 为浏览器端 Vercel Blob 直传签发一次性 token（需 admin cookie） |
+| `/api/upload` | POST | 接收 `{ blobUrl, date, title }` JSON，从 Blob 拉回 `.docx` 解析 + 图片外置 + AI 摘要后入 Redis，处理完自动删临时文件 |
 | `/api/migrate` | POST | 一次性将 `database.json` 历史数据迁移至 Upstash Redis（需鉴权） |
 | `/api/migrate/extract-images` | POST | 一次性把 Redis 里历史文档的 base64 图片抽出，外置到 Vercel Blob（需鉴权） |
 | `/api/migrate/clean-orphan-images` | POST | 扫描 Blob 与 Redis 对比，列出/删除"无文档引用"的孤儿图（需鉴权） |
@@ -285,3 +286,41 @@ curl -X POST "https://你的域名/api/migrate/clean-orphan-images?dryRun=1" \
 3. **新上传 docx 自动走 Blob**：`/api/upload` 里用 mammoth 的 `convertImage` 钩子拦截内嵌图片直传 Blob，HTML 里只写 URL。历史文档走过一次 `extract-images` 即可。
 4. **SHA-256 去重记在 Redis**：键为 `img:{hash32}`。删除 Blob 图片时 `clean-orphan-images` 会同步清这条映射，下次同内容图片会重新上传而不是命中失效 URL。
 5. **防复制开关**：`NEXT_PUBLIC_DISABLE_COPY_GUARD=1` 只在本地调试时设置。**不要**在 Vercel 生产环境配置这个变量，否则右键/复制保护会失效。
+
+---
+
+## 大文件上传链路（2026-04 改造）
+
+> 背景：Vercel Serverless Function 对请求体有 **4.5 MB** 的硬限制，
+> 带图 Word 文档常常超过这个值，导致生产端上传报 "网络连接错误"。
+> 本次改造把上传通道从 "浏览器 → 函数 → Blob" 改为 "浏览器 → Blob → 函数"。
+
+### 新链路
+
+```
+┌────────┐  1. POST handshake  ┌─────────────────────────┐
+│浏览器  │ ──────────────────▶ │ /api/upload/blob-token  │  (签发短期 token)
+│admin   │ ◀──────────────────  └─────────────────────────┘
+│页面    │  2. PUT docx 直传（绕开 4.5MB 限制，最大 50MB）
+│        │ ──────────────────▶  https://*.blob.vercel-storage.com
+│        │  3. 拿到 Blob URL
+│        │  4. POST { blobUrl, date, title }  ┌────────────────┐
+│        │ ─────────────────────────────────▶ │ /api/upload    │
+│        │                                    │ (maxDuration60)│
+│        │                                    │ fetch blob →   │
+│        │                                    │ mammoth 解析 → │
+│        │                                    │ 图片外置 Blob→ │
+│        │                                    │ AI 摘要 →      │
+│        │                                    │ 写 Redis →     │
+│        │                                    │ 删除临时 docx  │
+│        │ ◀───────────────────────────────── └────────────────┘
+└────────┘  5. { success, doc }
+```
+
+### 关键点
+
+- `/api/upload/blob-token` **必须校验 admin cookie**，否则任何人都能白嫖存储配额；
+- `/api/upload` 只接受来自 `*.public.blob.vercel-storage.com` 的 URL，避免被当 SSRF 跳板；
+- 临时 docx 解析完立即调 `@vercel/blob` 的 `del()` 删除，成功/失败都清理；
+- `export const maxDuration = 60` 把函数超时从 Hobby 默认的 10s 提到 60s（Hobby 计划上限）；
+- 本地开发同样走新链路，只要 `BLOB_READ_WRITE_TOKEN` 配好即可，无需额外调整。
