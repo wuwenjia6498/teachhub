@@ -50,8 +50,10 @@ export default function HomePage() {
       setLoading(false);
     }
 
-    /* 始终在后台拉一次最新数据，保证内容不过期 */
-    fetch("/api/docs")
+    /* 始终在后台拉一次最新数据，保证内容不过期
+     * cache: "no-store" 确保从 admin 回到首页时能立即看到刚改/新增的文档，
+     * 避免浏览器 HTTP 缓存屏蔽了服务端已更新的 index */
+    fetch("/api/docs", { cache: "no-store" })
       .then((res) => res.json())
       .then((data: Doc[]) => {
         setDocs(data);

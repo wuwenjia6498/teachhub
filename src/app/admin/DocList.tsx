@@ -57,9 +57,11 @@ export default function DocList({ onReady }: DocListProps) {
   const [savingId, setSavingId] = useState<string | null>(null);
   const [editError, setEditError] = useState("");
 
-  /* 拉取列表：挂载一次；上传成功后由父组件通过 handle.refresh() 再触发一次 */
+  /* 拉取列表：挂载一次；上传成功后由父组件通过 handle.refresh() 再触发一次
+   * cache: "no-store" 保证管理员刚编辑/上传完能立即看到最新数据，
+   * 避免浏览器 HTTP 缓存或 Next.js Data Cache 返回旧 index */
   const fetchDocs = useCallback(() => {
-    fetch("/api/docs")
+    fetch("/api/docs", { cache: "no-store" })
       .then((r) => r.json())
       .then((data: DocItem[]) => setDocs(data))
       .catch(() => setDocs([]));

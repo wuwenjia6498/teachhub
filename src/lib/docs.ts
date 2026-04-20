@@ -1,6 +1,6 @@
 import { cache as reactCache } from "react";
 import { Redis } from "@upstash/redis";
-import { unstable_cache, revalidateTag } from "next/cache";
+import { unstable_cache, revalidatePath, revalidateTag } from "next/cache";
 import { gzipSync, gunzipSync } from "node:zlib";
 import type { Doc } from "@/types/doc";
 
@@ -78,14 +78,22 @@ function memInvalidate(prefix: string) {
  * 对外 API
  * ========================================================================== */
 
-/** 读取全部元信息列表；失败时返回空数组（内存缓存 + Next.js tag 缓存双层） */
+/**
+ * 读取全部元信息列表；失败时返回空数组
+ *
+ * 缓存策略（2026-04 修订）：
+ *   - 只保留 Next.js 的 unstable_cache（tag-based，revalidateTag 能**全局**失效）
+ *   - **不再用**实例本地 memCache 缓存 index
+ *     原因：memCache 是进程级 Map，实例 A 写后只清 A 的，实例 B 仍持旧数据
+ *     60 秒；Vercel 多 warm 实例下 "编辑后 fetch 看不到新数据" 就是这来的。
+ *     index 本身很小（几十条 meta），直接走 Redis 影响可忽略。
+ *   - getDocById 保留 memCache，因为单文档内容大、修改频率低，跨实例一致性
+ *     要求低（SSR 的 ISR 已是权威）。
+ */
 export const readDocsMeta = unstable_cache(
   async (): Promise<DocMeta[]> => {
-    const cached = memGet<DocMeta[]>("index");
-    if (cached) return cached;
     try {
       const index = (await kv.get<DocMeta[]>(INDEX_KEY)) ?? [];
-      memSet("index", index);
       return index;
     } catch {
       return [];
@@ -154,10 +162,14 @@ export async function prependDoc(doc: Doc): Promise<void> {
     kv.set(INDEX_KEY, next),
   ]);
 
-  /* 同步失效内存缓存 + Next.js tag 缓存，保证下一次读取拿到最新数据 */
-  memInvalidate("index");
+  /* 失效所有相关缓存层：
+   * - memCache[doc:{id}]：该实例本地读取时立即生效
+   * - unstable_cache(tag=docs-index)：全局所有实例下次 readDocsMeta 时回源
+   * - revalidatePath("/") + "/doc/{id}"：让 ISR 预渲染的静态 HTML 立刻失效 */
   memInvalidate(`doc:${doc.id}`);
   revalidateTag(CACHE_TAG_INDEX);
+  revalidatePath("/");
+  revalidatePath(`/doc/${doc.id}`);
 }
 
 /**
@@ -173,8 +185,9 @@ export async function updateDocContent(id: string, content: string): Promise<voi
   const updated: Doc = { ...raw, content: compressContent(content) };
   await kv.set(key, updated);
 
-  /* 本地与 Next.js 的缓存都失效，下次读拿到最新 */
+  /* 本地缓存 + ISR 静态 HTML 都失效，下次读拿到最新 */
   memInvalidate(`doc:${id}`);
+  revalidatePath(`/doc/${id}`);
 }
 
 /**
@@ -220,10 +233,11 @@ export async function updateDocMeta(
     await kv.set(INDEX_KEY, index);
   }
 
-  /* 失效所有相关缓存 */
-  memInvalidate("index");
+  /* 失效所有相关缓存：见 prependDoc 同名注释 */
   memInvalidate(`doc:${id}`);
   revalidateTag(CACHE_TAG_INDEX);
+  revalidatePath("/");
+  revalidatePath(`/doc/${id}`);
 
   const { content: _omit, ...metaOut } = nextDoc;
   return metaOut;
@@ -246,8 +260,9 @@ export async function deleteDoc(id: string): Promise<boolean> {
     kv.del(`doc:${id}`),
   ]);
 
-  memInvalidate("index");
   memInvalidate(`doc:${id}`);
   revalidateTag(CACHE_TAG_INDEX);
+  revalidatePath("/");
+  revalidatePath(`/doc/${id}`);
   return true;
 }
