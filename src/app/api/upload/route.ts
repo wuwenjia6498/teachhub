@@ -1,17 +1,17 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest, NextResponse, after } from "next/server";
 import mammoth from "mammoth";
 import { del } from "@vercel/blob";
 import type { Doc } from "@/types/doc";
-import { prependDoc } from "@/lib/docs";
+import { prependDoc, updateDocSummary } from "@/lib/docs";
 import { uploadImage } from "@/lib/imageStorage";
 
 /* ============================================================================
  * Route Segment Config
  * ----------------------------------------------------------------------------
- * - runtime = 'nodejs'：mammoth 依赖 Node API，不能跑 Edge
+ * - runtime = 'nodejs'：mammoth 依赖 Node API（Buffer / zlib），不能跑 Edge
  * - maxDuration = 60：Vercel Hobby 计划允许的最长函数执行时间（秒）。
- *   解析大 docx + 并发上传图片 + 调 Gemini 摘要 + 写 Redis，链路较长，
- *   默认 10 秒经常不够。拉到 60s 能覆盖 95% 以上的真实文档。
+ *   用户感知时长 = 解析 docx + 图片并发上传 Blob + 写 Redis（通常 5-15 秒）
+ *   after() 里的 AI 摘要生成也计入这个 60 秒预算，但用户已经不用等了。
  * ========================================================================== */
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -140,17 +140,13 @@ export async function POST(req: NextRequest) {
     );
     const htmlContent = result.value;
 
-    /* ---------- 4. 生成标题 / 摘要 / 日期 ---------- */
+    /* ---------- 4. 生成标题 / 日期 ---------- */
     /* 标题优先用前端传的（原始文件名 -> 去 .docx）；否则从 URL 兜底 */
     const title =
       (inputTitle ?? "").replace(/\.docx$/i, "").trim() ||
       decodeURIComponent(
         blobUrl.split("/").pop() ?? "未命名",
       ).replace(/\.docx$/i, "").replace(/-[A-Za-z0-9]{8,}$/, "");
-
-    /* 提取纯文本用于 AI 摘要 */
-    const plainText = htmlContent.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-    const summary = await generateSummary(plainText);
 
     /* 分享日期：优先使用前端传入的人工选择日期，否则取当前日期 */
     const date =
@@ -159,7 +155,9 @@ export async function POST(req: NextRequest) {
         : new Date().toISOString().split("T")[0];
     const id = String(Date.now());
 
-    const newDoc: Doc = { id, date, title, content: htmlContent, summary };
+    /* summary 先留空：AI 摘要放到 after() 里异步生成，不阻塞用户响应。
+     * 这样用户能在几秒内看到 "已入库"，摘要十几秒后自动补齐。 */
+    const newDoc: Doc = { id, date, title, content: htmlContent, summary: "" };
 
     /* ---------- 5. 写入 Redis ---------- */
     await prependDoc(newDoc);
@@ -171,7 +169,25 @@ export async function POST(req: NextRequest) {
       console.error("删除临时 docx Blob 失败（忽略）:", err);
     }
 
-    return NextResponse.json({ success: true, doc: { id, date, title, summary } });
+    /* ---------- 7. 后台生成 AI 摘要（响应返回后继续执行） ----------
+     * Next.js 15 的 after() 保证在 res 发给客户端之后仍然能跑完这块代码，
+     * 同时不算进用户感知的接口耗时。失败也不影响用户：摘要保留空值即可。 */
+    const plainText = htmlContent.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+    after(async () => {
+      try {
+        const summary = await generateSummary(plainText);
+        if (summary) await updateDocSummary(id, summary);
+      } catch (err) {
+        console.error("[after] AI 摘要后台生成失败:", err);
+      }
+    });
+
+    /* 立刻返回，前端不再等摘要（原本常 5-20 秒） */
+    return NextResponse.json({
+      success: true,
+      doc: { id, date, title, summary: "" },
+      summaryPending: true, /* 前端可据此文案提示 "摘要稍后生成" */
+    });
   } catch (err) {
     console.error("上传解析失败:", err);
     /* 失败时也尽量清掉临时 docx，避免孤儿文件堆积 */

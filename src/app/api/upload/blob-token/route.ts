@@ -15,7 +15,14 @@ import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
  *   - 浏览器 @vercel/blob/client 的 upload() 会先 POST 一个 HandleUploadBody 过来
  *   - 这里校验 admin 身份后，调用 handleUpload() 返回 token
  *   - 浏览器拿 token 直传到 blob.vercel-storage.com（走 Vercel CDN，不走我们的函数）
+ *
+ * ── Route Segment Config ──
+ * runtime = 'edge'：这个路由只用了 Web 标准 API（Request / cookies / fetch /
+ * Web Crypto），handleUpload 也兼容 Edge。跑在 Edge V8 Isolate 上冷启动仅
+ * 5-30ms，相比 Node runtime 的 300-600ms 有显著收益。admin 后台属低频访问，
+ * 几乎每次点"上传"都会命中冷启动，体感差距明显。
  */
+export const runtime = "edge";
 
 /** 仅 admin cookie 校验通过的人才有资格请求上传 token，避免被第三方白嫖存储配额 */
 function isAuthed(req: NextRequest): boolean {

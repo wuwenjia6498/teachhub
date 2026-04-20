@@ -12,3 +12,12 @@
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
     Arial, sans-serif;
 }
+
+/**
+ * 不确定态进度条动画：用于"服务端处理中"这种前端拿不到真实进度的阶段。
+ * 一条高亮光带在底色上从左滑到右，循环流动，向用户传达"正在进行中"。
+ */
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}

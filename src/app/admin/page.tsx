@@ -43,6 +43,11 @@ export default function AdminPage() {
   const [message, setMessage] = useState("");
   const [shareDate, setShareDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  /* 上传进度：0-100，仅在"浏览器 → Vercel Blob"阶段有效。
+   * 解析阶段因为在服务端跑，前端拿不到进度，统一显示"解析中"。 */
+  const [uploadPercent, setUploadPercent] = useState(0);
+  /* 上传流程内部细分阶段：方便 UI 给不同文案 / 进度样式 */
+  const [phase, setPhase] = useState<"idle" | "sending" | "parsing">("idle");
   const [docs, setDocs] = useState<DocItem[]>([]);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
@@ -180,6 +185,8 @@ export default function AdminPage() {
     }
 
     setState("uploading");
+    setPhase("sending");
+    setUploadPercent(0);
     setMessage("正在上传文件...");
 
     try {
@@ -190,10 +197,16 @@ export default function AdminPage() {
         contentType:
           file.type ||
           "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        onUploadProgress: (p) => {
+          /* percentage 由 @vercel/blob/client 基于 loaded/total 计算，范围 0-100 */
+          setUploadPercent(Math.round(p.percentage));
+        },
       });
 
       /* Step 2. 触发服务端解析入库 —— 只传 URL + 元数据，几百字节 */
-      setMessage("文件已上传，正在解析并生成摘要...");
+      setPhase("parsing");
+      setUploadPercent(100);
+      setMessage("文件已上传，正在解析文档...");
       const res = await fetch("/api/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -207,7 +220,12 @@ export default function AdminPage() {
 
       if (res.ok && data.success) {
         setState("success");
-        setMessage(`更新成功，已添加「${data.doc.title}」至首页`);
+        /* summaryPending 为 true：后台还在生成摘要，给用户明确的文案预期 */
+        setMessage(
+          data.summaryPending
+            ? `更新成功，已添加「${data.doc.title}」至首页。摘要将在约 10-20 秒后自动生成。`
+            : `更新成功，已添加「${data.doc.title}」至首页。`,
+        );
         setPendingFile(null);
         /* 首页列表客户端缓存失效，保证返回首页能立刻看到新文档 */
         cacheDel(docListKey);
@@ -221,6 +239,8 @@ export default function AdminPage() {
       setState("error");
       const msg = err instanceof Error ? err.message : "";
       setMessage(msg ? `上传失败：${msg}` : "网络错误，请检查连接后重试");
+    } finally {
+      setPhase("idle");
     }
   }, [fetchDocs]);
 
@@ -262,6 +282,8 @@ export default function AdminPage() {
     setState("idle");
     setMessage("");
     setPendingFile(null);
+    setUploadPercent(0);
+    setPhase("idle");
     if (inputRef.current) inputRef.current.value = "";
   };
 
@@ -449,6 +471,32 @@ export default function AdminPage() {
               <p className={`text-sm ${state === "error" ? "text-[#ab7a7a]" : "text-[#6a8a7a]"}`}>
                 {message}
               </p>
+            )}
+
+            {/* 上传进度条
+             * - sending（浏览器 → Vercel Blob）：真实进度 0-100%，平滑过渡
+             * - parsing（服务端解析）：拿不到真实进度，改用不确定态的流动条 */}
+            {state === "uploading" && (
+              <div className="mt-3 w-56 mx-auto">
+                <div className="h-1.5 rounded-full bg-[#e8e5df] overflow-hidden relative">
+                  {phase === "sending" && (
+                    <div
+                      className="h-full bg-[#8aab9a] transition-[width] duration-200 ease-out"
+                      style={{ width: `${uploadPercent}%` }}
+                    />
+                  )}
+                  {phase === "parsing" && (
+                    /* 服务端处理中：100% 底色 + 覆盖一条平移的浅绿光带表示"进行中" */
+                    <>
+                      <div className="h-full w-full bg-[#c6dcd1]" />
+                      <div className="absolute inset-y-0 left-0 w-1/3 bg-[#8aab9a] animate-[progress-indeterminate_1.4s_ease-in-out_infinite]" />
+                    </>
+                  )}
+                </div>
+                <p className="mt-1.5 text-[11px] text-[#a0a0a0] tracking-wide">
+                  {phase === "sending" ? `${uploadPercent}%` : "服务端处理中..."}
+                </p>
+              </div>
             )}
           </div>
 

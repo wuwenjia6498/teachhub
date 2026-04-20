@@ -111,6 +111,7 @@ curl -X POST https://你的域名/api/migrate/extract-images \
 | `/api/migrate` | POST | 一次性将 `database.json` 历史数据迁移至 Upstash Redis（需鉴权） |
 | `/api/migrate/extract-images` | POST | 一次性把 Redis 里历史文档的 base64 图片抽出，外置到 Vercel Blob（需鉴权） |
 | `/api/migrate/clean-orphan-images` | POST | 扫描 Blob 与 Redis 对比，列出/删除"无文档引用"的孤儿图（需鉴权） |
+| `/api/migrate/reconcile-index` | POST | 对账 `doc:*` 与 `docs:index`，修复"内容存在但索引里没有"的孤儿文档（需鉴权） |
 
 ---
 
@@ -324,3 +325,49 @@ curl -X POST "https://你的域名/api/migrate/clean-orphan-images?dryRun=1" \
 - 临时 docx 解析完立即调 `@vercel/blob` 的 `del()` 删除，成功/失败都清理；
 - `export const maxDuration = 60` 把函数超时从 Hobby 默认的 10s 提到 60s（Hobby 计划上限）；
 - 本地开发同样走新链路，只要 `BLOB_READ_WRITE_TOKEN` 配好即可，无需额外调整。
+
+### 索引对账（孤儿文档恢复）
+
+早期 `prependDoc` / `deleteDoc` 基于缓存读旧索引再覆盖写，在"本地 + 生产"
+或多 warm 实例交替上传时可能触发 lost update，造成：
+
+- **孤儿文档**：`doc:{id}` 还在 Redis，但被挤出了 `docs:index` → 首页看不到
+- **悬空索引**：`docs:index` 提到某个 id，但 `doc:{id}` 已被删除 → 详情页 404
+
+接口 `/api/migrate/reconcile-index` 提供三种模式处理这类不一致：
+
+```powershell
+# 1) dryRun：只读诊断，列出孤儿/悬空清单（含 title/date/contentPreview）
+Invoke-RestMethod `
+  -Uri "https://你的域名/api/migrate/reconcile-index?mode=dryRun" `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer $env:ADMIN_PASSWORD" }
+
+# 2) restore：把孤儿 doc 的 meta 合并回 docs:index，并清除悬空条目
+Invoke-RestMethod `
+  -Uri "https://你的域名/api/migrate/reconcile-index?mode=restore" `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer $env:ADMIN_PASSWORD" }
+
+# 3) purge：把孤儿的 doc:{id} 从 Redis 直接删掉，并清除悬空条目
+Invoke-RestMethod `
+  -Uri "https://你的域名/api/migrate/reconcile-index?mode=purge" `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer $env:ADMIN_PASSWORD" }
+```
+
+**推荐流程**：先 dryRun 看清单 → 判断孤儿是否要保留 → 要保留跑 restore，
+不要跑 purge → 最后再 dryRun 一次验证 `orphanCount=0 && danglingCount=0` 即对账完成。
+
+### 体验 & 性能优化（配套）
+
+1. **上传进度条**（`admin/page.tsx`）：接 `@vercel/blob/client` 的 `onUploadProgress`
+   回调，浏览器→Blob 阶段显示真实百分比；服务端解析阶段显示不确定态流动条，
+   keyframes 定义在 `globals.css` 的 `progress-indeterminate`。
+2. **AI 摘要异步化**（`api/upload/route.ts`）：用 Next.js 15 的 `after()` 在
+   响应返回后继续生成 Gemini 摘要，生成完再调 `updateDocSummary()` 补回 Redis。
+   用户感知的 `/api/upload` 时长从原来 15-35s 缩到 5-15s。响应体新增
+   `summaryPending: true`，前端文案提示 "摘要将在 10-20 秒后自动生成"。
+3. **Edge Runtime 冷启动**（`api/upload/blob-token/route.ts`）：该路由只用 Web
+   标准 API，加 `export const runtime = "edge"` 后冷启动从 300-600ms 降到
+   5-30ms。admin 低频访问下体感非常明显。
