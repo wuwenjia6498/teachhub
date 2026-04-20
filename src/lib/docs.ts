@@ -129,12 +129,21 @@ export const getDocById = reactCache(async (id: string): Promise<Doc | null> => 
   }
 });
 
-/** 将新文档插入 KV：全文存 doc:{id}（content 压缩后存），元信息追加到索引头部 */
+/**
+ * 将新文档插入 KV：全文存 doc:{id}（content 压缩后存），元信息追加到索引头部。
+ *
+ * 【并发安全】读旧索引时**必须直读 Redis**，不能走 memCache / unstable_cache。
+ * 否则在下列场景会触发 lost update：
+ *   - 多 Vercel warm 实例同时收到上传请求，各自 memCache 持有不同快照
+ *   - 本地 dev 和生产共用同一 Redis，两端交替上传（memCache 互不感知）
+ * 代价是每次上传多一次 Redis GET（~30-80ms），而上传本就是低频操作，代价可忽略。
+ * 读取路径（首页 / 详情页）仍然走缓存，性能不受影响。
+ */
 export async function prependDoc(doc: Doc): Promise<void> {
   const { content: _content, ...meta } = doc;
 
-  /* 先读旧索引（尽量用缓存），再在头部追加 */
-  const index = await readDocsMeta();
+  /* 写入前基于 Redis 最新快照，避免被缓存的旧索引覆盖掉其它实例的写入 */
+  const index = (await kv.get<DocMeta[]>(INDEX_KEY)) ?? [];
   const next = [meta, ...index];
 
   /* 压缩正文后再写 Redis，体积通常只剩 15-25%，网络传输更快 */
@@ -260,9 +269,14 @@ export async function updateDocSummary(id: string, summary: string): Promise<voi
   revalidateTag(CACHE_TAG_INDEX);
 }
 
-/** 按 id 删除文档；成功返回 true，不存在返回 false */
+/**
+ * 按 id 删除文档；成功返回 true，不存在返回 false。
+ *
+ * 同 prependDoc：**写入前直读 Redis 拿最新索引**，不走缓存。否则两端交替
+ * 写入时会把别人刚插入的文档一起挤出索引，详见 prependDoc 注释。
+ */
 export async function deleteDoc(id: string): Promise<boolean> {
-  const index = await readDocsMeta();
+  const index = (await kv.get<DocMeta[]>(INDEX_KEY)) ?? [];
   const filtered = index.filter((d) => d.id !== id);
 
   if (filtered.length === index.length) return false;
