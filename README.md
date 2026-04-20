@@ -361,13 +361,29 @@ Invoke-RestMethod `
 
 ### 体验 & 性能优化（配套）
 
-1. **上传进度条**（`admin/page.tsx`）：接 `@vercel/blob/client` 的 `onUploadProgress`
+1. **上传进度条**（`admin/UploadZone.tsx`）：接 `@vercel/blob/client` 的 `onUploadProgress`
    回调，浏览器→Blob 阶段显示真实百分比；服务端解析阶段显示不确定态流动条，
    keyframes 定义在 `globals.css` 的 `progress-indeterminate`。
-2. **AI 摘要异步化**（`api/upload/route.ts`）：用 Next.js 15 的 `after()` 在
-   响应返回后继续生成 Gemini 摘要，生成完再调 `updateDocSummary()` 补回 Redis。
-   用户感知的 `/api/upload` 时长从原来 15-35s 缩到 5-15s。响应体新增
-   `summaryPending: true`，前端文案提示 "摘要将在 10-20 秒后自动生成"。
+2. **AI 摘要同步生成**（`api/upload/route.ts`）：上传请求前台等待 8-20 秒直到摘要落库。
+   曾经试过 `after()` 异步 + Cron 兜底的方案，但 serverless worker 在响应返回后
+   被回收导致 `after()` 静默失败率偏高，最终回滚为同步方案，用稳定性换一点等待时长。
+   AI 偶发失败时 `summary` 为空入库，重传同一个文件即可覆盖。
 3. **Edge Runtime 冷启动**（`api/upload/blob-token/route.ts`）：该路由只用 Web
    标准 API，加 `export const runtime = "edge"` 后冷启动从 300-600ms 降到
    5-30ms。admin 低频访问下体感非常明显。
+
+---
+
+## Admin 页面组件结构
+
+`/admin` 拆分为四个文件，各司其职：
+
+| 文件 | 作用 |
+|------|------|
+| `src/app/admin/page.tsx` | 入口薄壳：登录门 + 导航 + 子组件编排，~50 行 |
+| `src/app/admin/LoginGate.tsx` | 密码校验与 httpOnly cookie 检查；未登录时不渲染内部内容 |
+| `src/app/admin/UploadZone.tsx` | 拖拽区 + 直传 Vercel Blob + 触发服务端解析的完整链路 |
+| `src/app/admin/DocList.tsx` | 已上传文档列表 + 行内编辑（PATCH）+ 删除（DELETE） |
+
+任何写操作成功后都应调用 `invalidateDocCache(id?)`（定义在 `src/lib/clientCache.ts`）
+统一失效首页列表 / 单篇详情的 sessionStorage 缓存，避免回到首页看到旧数据。

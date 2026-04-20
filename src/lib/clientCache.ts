@@ -62,6 +62,20 @@ export const docKey = (id: string) => `doc:${id}`;
 export const docListKey = "doc-list";
 
 /**
+ * 统一的写后缓存失效：任何会改变 Redis 文档数据的操作
+ * （新增 / 编辑 / 删除）完成后都应调用本函数。
+ * - 必然失效首页列表缓存（docs:index 已变）
+ * - 传入 id 时同时失效该篇详情缓存（避免详情页读到旧 title/date/content）
+ *
+ * 好处：写路径多加一个就多一处 cacheDel，容易漏；集中到这里后，
+ * 新增写接口的同学只需要 `invalidateDocCache(id)` 一行，不会忘。
+ */
+export function invalidateDocCache(id?: string) {
+  cacheDel(docListKey);
+  if (id) cacheDel(docKey(id));
+}
+
+/**
  * 预拉取并缓存一篇文档；返回 Promise 以便调用者等待。
  * - 如果已经有未过期缓存，直接 resolve 已有值，不发请求
  * - 同时记录一个内存 pending 表，避免重复发多次请求

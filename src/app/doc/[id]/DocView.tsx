@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import Link from "next/link";
 import { ArrowLeft, Calendar } from "lucide-react";
 import type { Doc } from "@/types/doc";
-import { cacheGet, cacheSet, docKey } from "@/lib/clientCache";
+import { cacheSet, docKey } from "@/lib/clientCache";
 import CopyGuard from "./CopyGuard";
 
 /**
@@ -28,23 +28,22 @@ function getTypographyClass(html: string) {
 
 /**
  * 文档内容客户端视图
- * - 挂载时同步将 SSR 正文写入 sessionStorage，供返回/再次访问时秒开
- * - 如果 sessionStorage 已有缓存（由首页 hover 预拉触发），直接用缓存版本
- *   避免等待旧 RSC 响应造成的视觉闪烁
+ * --------------------------------------------------------------------------
+ * 策略（2026-04 修订）：
+ *   - SSR 下发的 initialDoc 始终视为**权威版本**，直接用于渲染
+ *   - 挂载后做 write-through：把 initialDoc 写入 sessionStorage，
+ *     下次返回 / 再次访问本页时前端有"秒开快照"
+ *   - **不再**用 sessionStorage 的版本覆盖 initialDoc——旧实现会让
+ *     "管理员刚改过标题 / 重新抽图" 的新 SSR 内容被 30 分钟前的旧缓存盖掉，
+ *     造成"新内容闪一下又变回旧内容"的视觉闪烁
  */
 export default function DocView({ initialDoc }: { initialDoc: Doc }) {
-  const [doc, setDoc] = useState<Doc>(initialDoc);
+  /* 以 SSR 数据为准，无需额外 state 去覆盖 */
+  const doc = initialDoc;
 
-  /* id 变化或首次挂载时，尝试用 sessionStorage 的更快副本覆盖 */
+  /* 挂载后把最新的 SSR 结果写回 sessionStorage，供本标签页内再次访问时秒开 */
   useEffect(() => {
-    const cached = cacheGet<Doc>(docKey(initialDoc.id));
-    if (cached && cached.content) {
-      setDoc(cached);
-    } else {
-      /* SSR 数据已到达，就把它灌入 sessionStorage 供会话内复用 */
-      cacheSet(docKey(initialDoc.id), initialDoc, 30 * 60 * 1000);
-      setDoc(initialDoc);
-    }
+    cacheSet(docKey(initialDoc.id), initialDoc, 30 * 60 * 1000);
   }, [initialDoc]);
 
   const typoClass = useMemo(() => getTypographyClass(doc.content), [doc.content]);

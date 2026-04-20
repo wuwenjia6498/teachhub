@@ -81,6 +81,13 @@ export async function uploadImage(
 /**
  * 从 HTML 中扫描所有 <img src="data:image/...;base64,..."> 并外置为 URL
  * 返回：新 HTML + 本次新上传的图片数量（用于迁移进度统计）
+ *
+ * 实现：单次正则扫描 → 并发上传 → 按匹配顺序一次性拼接新字符串。
+ * 之所以不用多次 String.prototype.replace，是因为：
+ *   1. O(N × L)：每次 replace 都要在几 MB 的 HTML 里全量搜索，N 张图时浪费严重
+ *   2. 前缀冲突：如果两张图 base64 恰好前缀相同（极罕见但可能），
+ *      第一次 replace 会错误地改动第二张图的位置
+ * 一次性拼接能保证正确性和性能。
  */
 export async function extractInlineImages(
   html: string,
@@ -89,31 +96,41 @@ export async function extractInlineImages(
   const re =
     /src=(["'])data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+?)\1/g;
 
-  const tasks: Array<{
-    full: string;
+  /* 一次扫描收集：每张图的起止偏移、mime、base64、引号种类 */
+  interface Hit {
+    start: number; // 匹配起点
+    end: number; // 匹配终点（exclusive）
     mime: string;
     b64: string;
     quote: string;
-  }> = [];
-
+  }
+  const hits: Hit[] = [];
   for (const m of html.matchAll(re)) {
-    tasks.push({ full: m[0], quote: m[1], mime: m[2], b64: m[3] });
+    const start = m.index ?? -1;
+    if (start < 0) continue;
+    hits.push({
+      start,
+      end: start + m[0].length,
+      quote: m[1],
+      mime: m[2],
+      b64: m[3],
+    });
   }
 
-  if (tasks.length === 0) return { html, replaced: 0, failed: 0 };
+  if (hits.length === 0) return { html, replaced: 0, failed: 0 };
 
-  /* 并发上传，但用 map+Promise.all 不会阻塞太久；如文档图极多可分批 */
+  /* 并发上传每张图；失败时 replacement=null，表示保留原 base64（不替换） */
   let replaced = 0;
   let failed = 0;
-  const replacements = await Promise.all(
-    tasks.map(async (t) => {
+  const results = await Promise.all(
+    hits.map(async (h) => {
       try {
         /* base64 可能含换行/空白（HTML 里极少见但规范允许），先剥离 */
-        const clean = t.b64.replace(/\s+/g, "");
+        const clean = h.b64.replace(/\s+/g, "");
         const buf = Buffer.from(clean, "base64");
-        const url = await uploadImage(buf, t.mime);
+        const url = await uploadImage(buf, h.mime);
         replaced++;
-        return { full: t.full, replacement: `src=${t.quote}${url}${t.quote}` };
+        return `src=${h.quote}${url}${h.quote}`;
       } catch (err) {
         failed++;
         console.error("图片上传失败，保留原 base64:", err);
@@ -122,14 +139,21 @@ export async function extractInlineImages(
     }),
   );
 
-  /* 按"出现位置"顺序替换，避免多次替换破坏字符串偏移 */
-  let out = html;
-  for (const r of replacements) {
-    if (!r) continue;
-    out = out.replace(r.full, r.replacement);
+  /* 按匹配顺序一次性拼接：不修改原 html，直接按偏移切片 + 拼接结果串。
+   * hits 天然有序（matchAll 按出现顺序），无需再排序。 */
+  const out: string[] = [];
+  let cursor = 0;
+  for (let i = 0; i < hits.length; i++) {
+    const h = hits[i];
+    const repl = results[i];
+    out.push(html.slice(cursor, h.start));
+    /* 上传成功用新 src，失败则原样保留 */
+    out.push(repl ?? html.slice(h.start, h.end));
+    cursor = h.end;
   }
+  out.push(html.slice(cursor));
 
-  return { html: out, replaced, failed };
+  return { html: out.join(""), replaced, failed };
 }
 
 /* ==========================================================================
