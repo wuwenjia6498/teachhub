@@ -4,6 +4,7 @@ import { del } from "@vercel/blob";
 import type { Doc } from "@/types/doc";
 import { prependDoc, updateDocSummary } from "@/lib/docs";
 import { uploadImage } from "@/lib/imageStorage";
+import { generateSummary, extractPlainText } from "@/lib/summaries";
 
 /* ============================================================================
  * Route Segment Config
@@ -15,49 +16,6 @@ import { uploadImage } from "@/lib/imageStorage";
  * ========================================================================== */
 export const runtime = "nodejs";
 export const maxDuration = 60;
-
-const AIHUBMIX_API_URL = "https://aihubmix.com/v1/chat/completions";
-const AIHUBMIX_MODEL = "gemini-2.5-flash";
-
-/**
- * 调用 AIHUBMIX Gemini 生成文档核心摘要
- * 若 API Key 未配置或调用失败，静默回退返回空字符串
- */
-async function generateSummary(plainText: string): Promise<string> {
-  const apiKey = process.env.AIHUBMIX_API_KEY;
-  if (!apiKey) return "";
-
-  try {
-    const res = await fetch(AIHUBMIX_API_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: AIHUBMIX_MODEL,
-        messages: [
-          {
-            role: "system",
-            content:
-              '你是文档摘要助手。请以"本次分享"开头，用一两句话概括以下文档的核心内容与要点，不超过80字，语言简洁专业。不要输出任何思考过程，直接给出摘要。',
-          },
-          { role: "user", content: plainText.slice(0, 4000) },
-        ],
-        temperature: 0.3,
-        max_tokens: 1024,
-      }),
-    });
-
-    if (!res.ok) return "";
-
-    const data = await res.json();
-    return (data.choices?.[0]?.message?.content ?? "").trim();
-  } catch (err) {
-    console.error("AI 摘要生成失败，将使用默认截取:", err);
-    return "";
-  }
-}
 
 /* ============================================================================
  * POST /api/upload
@@ -171,14 +129,18 @@ export async function POST(req: NextRequest) {
 
     /* ---------- 7. 后台生成 AI 摘要（响应返回后继续执行） ----------
      * Next.js 15 的 after() 保证在 res 发给客户端之后仍然能跑完这块代码，
-     * 同时不算进用户感知的接口耗时。失败也不影响用户：摘要保留空值即可。 */
-    const plainText = htmlContent.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+     * 同时不算进用户感知的接口耗时。失败也不影响用户：
+     *   - 摘要先留空值
+     *   - Vercel Cron（/api/cron/backfill-summaries）每 6 小时自动扫漏补齐
+     *   - 或者管理员手动调 /api/admin/backfill-summaries 立刻补齐
+     */
+    const plainText = extractPlainText(htmlContent);
     after(async () => {
       try {
         const summary = await generateSummary(plainText);
-        if (summary) await updateDocSummary(id, summary);
+        await updateDocSummary(id, summary);
       } catch (err) {
-        console.error("[after] AI 摘要后台生成失败:", err);
+        console.error("[after] AI 摘要后台生成失败（将由 cron 稍后补齐）:", err);
       }
     });
 

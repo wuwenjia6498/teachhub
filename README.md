@@ -38,6 +38,7 @@ cp .env.local.example .env.local
 | `UPSTASH_REDIS_REST_URL` | Upstash Redis REST API 地址 | 必填 |
 | `UPSTASH_REDIS_REST_TOKEN` | Upstash Redis REST Token | 必填 |
 | `BLOB_READ_WRITE_TOKEN` | Vercel Blob 读写 Token（docx 内嵌图片外置 / 历史图片迁移） | 必填 |
+| `CRON_SECRET` | Vercel Cron 触发 `/api/cron/backfill-summaries` 时的鉴权密钥（`Authorization: Bearer` 比对） | 生产必填 |
 
 Upstash 连接信息获取方式：登录 [upstash.com](https://upstash.com) → 选择数据库 → 复制 REST API 区域的 URL 和 Token。
 
@@ -112,6 +113,8 @@ curl -X POST https://你的域名/api/migrate/extract-images \
 | `/api/migrate/extract-images` | POST | 一次性把 Redis 里历史文档的 base64 图片抽出，外置到 Vercel Blob（需鉴权） |
 | `/api/migrate/clean-orphan-images` | POST | 扫描 Blob 与 Redis 对比，列出/删除"无文档引用"的孤儿图（需鉴权） |
 | `/api/migrate/reconcile-index` | POST | 对账 `doc:*` 与 `docs:index`，修复"内容存在但索引里没有"的孤儿文档（需鉴权） |
+| `/api/admin/backfill-summaries` | POST | 管理员手动批量补齐"AI 摘要为空"的文档（需 admin cookie） |
+| `/api/cron/backfill-summaries` | GET | Vercel Cron 入口，每 6 小时自动扫漏补齐摘要（`CRON_SECRET` 鉴权） |
 
 ---
 
@@ -371,3 +374,34 @@ Invoke-RestMethod `
 3. **Edge Runtime 冷启动**（`api/upload/blob-token/route.ts`）：该路由只用 Web
    标准 API，加 `export const runtime = "edge"` 后冷启动从 300-600ms 降到
    5-30ms。admin 低频访问下体感非常明显。
+
+### AI 摘要的"异步 + 兜底"链路
+
+由于 `after()` 在 Vercel serverless 上偶发会被 worker 回收 / aihubmix 偶发超时，
+新上传的文档有小概率停在 `summary=""`。链路由三个入口组成，层层兜底：
+
+| 入口 | 触发方式 | 作用 |
+|------|------|------|
+| `/api/upload` 里的 `after()` | 每次上传自动 | 主链路，成功率 ~95%，响应快 |
+| `/api/cron/backfill-summaries` | Vercel Cron 每 6 小时触发 | 兜底扫漏，保证最终一致 |
+| `/api/admin/backfill-summaries` | 管理员手动 POST | 发现漏摘要立刻补齐，不用等 Cron |
+
+**配置步骤**（首次启用 Cron）：
+
+1. Vercel 控制台 → 项目 → Settings → Environment Variables，新增 `CRON_SECRET`
+   （任意强随机字符串，比如 `openssl rand -base64 32`）
+2. 把 `vercel.json` 里的 `crons` 配置随代码推上去，Vercel 会自动识别并注册
+3. Vercel → Settings → Crons 里能看到 `/api/cron/backfill-summaries` 条目
+   和下一次触发时间（UTC）
+
+**手动立刻补齐摘要**（浏览器登录 `/admin` 后，F12 控制台）：
+
+```javascript
+fetch('/api/admin/backfill-summaries', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ apply: true })
+}).then(r => r.json()).then(console.log)
+```
+
+先不带 `apply` 字段可以先 dryRun，只列出待补清单不真跑 AI。
