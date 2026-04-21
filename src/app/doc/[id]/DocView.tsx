@@ -48,6 +48,23 @@ export default function DocView({ initialDoc }: { initialDoc: Doc }) {
 
   const typoClass = useMemo(() => getTypographyClass(doc.content), [doc.content]);
 
+  /**
+   * 手机端图片加载优化：给所有 <img> 注入浏览器原生的懒加载和异步解码属性。
+   * - loading="lazy"：视口外的图片推迟到滚动靠近时才下载，首屏只加载 1-2 张
+   * - decoding="async"：图片解码不阻塞主线程，文字渲染更流畅
+   *
+   * 负向先行断言 (?![^>]*\sloading=) 避免对已含 loading 属性的 <img> 重复注入。
+   * mammoth 生成的 HTML 一般不会自带这些属性，但未来若改动上游保持幂等。
+   */
+  const contentHtml = useMemo(
+    () =>
+      doc.content.replace(
+        /<img\b(?![^>]*\sloading=)/gi,
+        '<img loading="lazy" decoding="async"',
+      ),
+    [doc.content],
+  );
+
   return (
     <div className="min-h-screen bg-[#f8f7f4]">
       {/* 顶部返回栏 */}
@@ -93,7 +110,7 @@ export default function DocView({ initialDoc }: { initialDoc: Doc }) {
                        prose-strong:text-[#3d3d3d]
                        prose-li:text-[#555] prose-li:leading-loose
                        prose-blockquote:border-l-[#c5d5cb] prose-blockquote:text-[#777]`}
-            dangerouslySetInnerHTML={{ __html: doc.content }}
+            dangerouslySetInnerHTML={{ __html: contentHtml }}
           />
         </main>
       </CopyGuard>
