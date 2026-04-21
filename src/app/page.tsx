@@ -95,7 +95,9 @@ export default function HomePage() {
     [docs]
   );
 
-  /* 搜索结果 */
+  /* 搜索结果
+   * 非搜索态：直接用 docs，顺序已由后端 readSortedDocsMeta 保证（date desc, id desc）
+   * 搜索态：保留 Fuse 相关度顺序，不再用日期覆盖——搜索的本质就是按相关度找东西 */
   const results = useMemo(() => {
     if (!query.trim()) return docs;
     return fuse.search(query).map((r) => r.item);

@@ -81,10 +81,23 @@ export const readDocsMeta = unstable_cache(
   { tags: [CACHE_TAG_INDEX], revalidate: 3600 },
 );
 
-/** 按 id（时间戳）倒序排列的元信息列表 */
+/**
+ * 按"分享时间 date"倒序排列的元信息列表
+ *
+ * 排序规则：
+ *   1. 主键：date（YYYY-MM-DD 字符串可直接字典序比较，等价于真实日期顺序）
+ *   2. 次键：id（同一天分享多条时，后上传的在前），保证稳定可预测
+ *
+ * 历史：曾经仅按 id 倒序，但 id = 上传时间戳 ≠ 分享日期，
+ * 偶尔会出现"后补录的旧分享"被错误地置顶。改用 date 主排序后，
+ * 前台 / 管理端 / API 三处视角一致，避免前端二次排序引入的不一致风险。
+ */
 export async function readSortedDocsMeta(): Promise<DocMeta[]> {
   const docs = await readDocsMeta();
-  return [...docs].sort((a, b) => Number(b.id) - Number(a.id));
+  return [...docs].sort((a, b) => {
+    if (a.date !== b.date) return a.date < b.date ? 1 : -1;
+    return Number(b.id) - Number(a.id);
+  });
 }
 
 /**
